@@ -5,6 +5,7 @@ import net.corda.core.schemas.PersistentState
 import net.corda.core.schemas.QueryableState
 import net.corda.core.serialization.SingletonSerializeAsToken
 import net.corda.node.services.api.SchemaService
+import net.corda.schemas.CashSchemaV1
 
 /**
  * Most basic implementation of [SchemaService].
@@ -15,7 +16,7 @@ import net.corda.node.services.api.SchemaService
  */
 class NodeSchemaService : SchemaService, SingletonSerializeAsToken() {
     // Currently does not support configuring schema options.
-    override val schemaOptions: Map<MappedSchema, SchemaService.SchemaOptions> = emptyMap()
+    override val schemaOptions: Map<MappedSchema, SchemaService.SchemaOptions> = mapOf(Pair(CashSchemaV1, SchemaService.SchemaOptions()))
 
     // Currently returns all schemas supported by the state, with no filtering or enrichment.
     override fun selectSchemas(state: QueryableState): Iterable<MappedSchema> {

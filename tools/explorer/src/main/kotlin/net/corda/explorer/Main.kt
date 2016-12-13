@@ -209,31 +209,43 @@ fun main(args: Array<String>) {
 
             for (i in 0..1000) {
                 Thread.sleep(500)
+
+                // Issuer requests
+                if ((i % 5) == 0) {
+                    issuerGBPEventGenerator.bankOfCordaIssueGenerator.map { command ->
+                        println("[$i] ISSUING ${command.amount} with ref ${command.issueRef} to ${command.recipient}")
+                        command.startFlow(issuerRPCGBP)
+                        Unit
+                    }.generate(SplittableRandom())
+                    issuerUSDEventGenerator.bankOfCordaIssueGenerator.map { command ->
+                        println("[$i] ISSUING ${command.amount} with ref ${command.issueRef} to ${command.recipient}")
+                        command.startFlow(issuerRPCUSD)
+                        Unit
+                    }.generate(SplittableRandom())
+                }
+
+                // Exit requests
+                if ((i % 10) == 0) {
+                    issuerGBPEventGenerator.bankOfCordaExitGenerator.map { command ->
+                        println("[$i] EXITING ${command.amount} with ref ${command.issueRef}")
+                        command.startFlow(issuerRPCGBP)
+                        Unit
+                    }.generate(SplittableRandom())
+                    issuerUSDEventGenerator.bankOfCordaExitGenerator.map { command ->
+                        println("[$i] EXITING ${command.amount} with ref ${command.issueRef}")
+                        command.startFlow(issuerRPCUSD)
+                        Unit
+                    }.generate(SplittableRandom())
+                }
+
                 // Party pay requests
                 listOf(aliceRPC, bobRPC).forEach {
                     eventGenerator.clientCommandGenerator.map { command ->
+                        println("[$i] SENDING ${command.amount} from ${it.nodeIdentity().legalIdentity} to ${command.recipient}")
                         command.startFlow(it)
                         Unit
                     }.generate(SplittableRandom())
                 }
-                // Exit requests
-                issuerGBPEventGenerator.bankOfCordaExitGenerator.map { command ->
-                    command.startFlow(issuerRPCGBP)
-                    Unit
-                }.generate(SplittableRandom())
-                issuerUSDEventGenerator.bankOfCordaExitGenerator.map { command ->
-                    command.startFlow(issuerRPCUSD)
-                    Unit
-                }.generate(SplittableRandom())
-                // Issuer requests
-                issuerGBPEventGenerator.bankOfCordaIssueGenerator.map { command ->
-                    command.startFlow(issuerRPCGBP)
-                    Unit
-                }.generate(SplittableRandom())
-                issuerUSDEventGenerator.bankOfCordaIssueGenerator.map { command ->
-                    command.startFlow(issuerRPCUSD)
-                    Unit
-                }.generate(SplittableRandom())
             }
             aliceClient.close()
             bobClient.close()

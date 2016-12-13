@@ -12,6 +12,8 @@ import net.corda.core.utilities.DUMMY_NOTARY
 import net.corda.core.utilities.DUMMY_PUBKEY_1
 import net.corda.core.utilities.DUMMY_PUBKEY_2
 import net.corda.core.utilities.LogHelper
+import net.corda.node.services.schema.HibernateObserver
+import net.corda.node.services.schema.NodeSchemaService
 import net.corda.node.services.vault.NodeVaultService
 import net.corda.node.utilities.configureDatabase
 import net.corda.node.utilities.databaseTransaction
@@ -47,6 +49,7 @@ class CashTests {
     lateinit var dataSource: Closeable
     lateinit var database: Database
     lateinit var vaultStatesUnconsumed: List<StateAndRef<Cash.State>>
+    lateinit var persister: HibernateObserver
 
     @Before
     fun setUp() {
@@ -68,6 +71,7 @@ class CashTests {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
+            persister = HibernateObserver(services.vaultService, NodeSchemaService())
 
             services.fillWithSomeTestCash(howMuch = 100.DOLLARS, atLeastThisManyStates = 1, atMostThisManyStates = 1,
                     issuedBy = MEGA_CORP.ref(1), issuerKey = MEGA_CORP_KEY, ownedBy = OUR_PUBKEY_1)
@@ -580,7 +584,7 @@ class CashTests {
         databaseTransaction(database) {
 
             val tx = TransactionType.General.Builder(DUMMY_NOTARY)
-            vault.generateSpend(tx, 80.DOLLARS, ALICE_PUBKEY, setOf(MINI_CORP))
+            vault.generateSpend(tx, 80.DOLLARS, ALICE_PUBKEY, setOf(MINI_CORP.toAnonymous()))
 
             assertEquals(vaultStatesUnconsumed.elementAt(2).ref, tx.inputStates()[0])
         }

@@ -17,6 +17,8 @@ import net.corda.core.utilities.DUMMY_NOTARY
 import net.corda.core.utilities.DUMMY_NOTARY_KEY
 import net.corda.core.utilities.DUMMY_PUBKEY_1
 import net.corda.core.utilities.TEST_TX_TIME
+import net.corda.node.services.schema.HibernateObserver
+import net.corda.node.services.schema.NodeSchemaService
 import net.corda.node.services.vault.NodeVaultService
 import net.corda.node.utilities.configureDatabase
 import net.corda.node.utilities.databaseTransaction
@@ -238,6 +240,8 @@ class CommercialPaperTestsGeneric {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
+            HibernateObserver(aliceServices.vaultService, NodeSchemaService())
+
             alicesVault = aliceServices.fillWithSomeTestCash(9000.DOLLARS, atLeastThisManyStates = 1, atMostThisManyStates = 1)
             aliceVaultService = aliceServices.vaultService
         }
@@ -258,6 +262,8 @@ class CommercialPaperTestsGeneric {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
+            HibernateObserver(bigCorpServices.vaultService, NodeSchemaService())
+
             bigCorpVault = bigCorpServices.fillWithSomeTestCash(13000.DOLLARS, atLeastThisManyStates = 1, atMostThisManyStates = 1)
             bigCorpVaultService = bigCorpServices.vaultService
         }
@@ -290,6 +296,15 @@ class CommercialPaperTestsGeneric {
         }
 
         databaseTransaction(databaseBigCorp) {
+            // Verify the txns are valid and insert into both sides.
+            listOf(issueTX, moveTX).forEach {
+                it.toLedgerTransaction(aliceServices).verify()
+                aliceServices.recordTransactions(it)
+                bigCorpServices.recordTransactions(it)
+            }
+        }
+
+        databaseTransaction(databaseBigCorp) {
             fun makeRedeemTX(time: Instant): SignedTransaction {
                 val ptx = TransactionType.General.Builder(DUMMY_NOTARY)
                 ptx.setTime(time, 30.seconds)
@@ -301,21 +316,16 @@ class CommercialPaperTestsGeneric {
             }
 
             val tooEarlyRedemption = makeRedeemTX(TEST_TX_TIME + 10.days)
-            val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days)
-
-            // Verify the txns are valid and insert into both sides.
-            listOf(issueTX, moveTX).forEach {
-                it.toLedgerTransaction(aliceServices).verify()
-                aliceServices.recordTransactions(it)
-                bigCorpServices.recordTransactions(it)
-            }
-
             val e = assertFailsWith(TransactionVerificationException::class) {
                 tooEarlyRedemption.toLedgerTransaction(aliceServices).verify()
             }
+            // manually release locks held by this failing transaction
+            aliceServices.vaultService.softLockRelease(tooEarlyRedemption.tx.lockId)
             assertTrue(e.cause!!.message!!.contains("paper must have matured"))
 
+            val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days)
             validRedemption.toLedgerTransaction(aliceServices).verify()
+            // soft lock not released after success either!!! (as transaction not recorded)
         }
     }
 }

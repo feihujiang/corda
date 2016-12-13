@@ -3,12 +3,15 @@ package net.corda.node.services.vault
 import io.requery.TransactionIsolation
 import io.requery.kotlin.`in`
 import io.requery.kotlin.eq
+import io.requery.kotlin.isNull
+import io.requery.kotlin.notNull
 import net.corda.contracts.asset.Cash
 import net.corda.core.ThreadBox
 import net.corda.core.bufferUntilSubscribed
 import net.corda.core.contracts.*
-import net.corda.core.crypto.AbstractParty
+import net.corda.core.crypto.AnonymousParty
 import net.corda.core.crypto.CompositeKey
+import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
 import net.corda.core.node.ServiceHub
 import net.corda.core.node.services.Vault
@@ -30,6 +33,7 @@ import net.corda.node.utilities.wrapWithDatabaseTransaction
 import rx.Observable
 import rx.subjects.PublishSubject
 import java.security.PublicKey
+import java.sql.SQLException
 import java.util.*
 
 /**
@@ -60,74 +64,82 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
 
         // For use during publishing only.
         val updatesPublisher: rx.Observer<Vault.Update> get() = _updatesPublisher.bufferUntilDatabaseCommit().tee(_rawUpdatesPublisher)
+    })
 
-        fun recordUpdate(update: Vault.Update): Vault.Update {
-            if (update != Vault.NoUpdate) {
-                val producedStateRefs = update.produced.map { it.ref }
-                val producedStateRefsMap = update.produced.associateBy { it.ref }
-                val consumedStateRefs = update.consumed.map { it.ref }
-                log.trace { "Removing $consumedStateRefs consumed contract states and adding $producedStateRefs produced contract states to the database." }
+    private fun recordUpdate(update: Vault.Update): Vault.Update {
+        if (update != Vault.NoUpdate) {
+            val producedStateRefs = update.produced.map { it.ref }
+            val producedStateRefsMap = update.produced.associateBy { it.ref }
+            val consumedStateRefs = update.consumed.map { it.ref }
+            log.trace { "Removing $consumedStateRefs consumed contract states and adding $producedStateRefs produced contract states to the database." }
+
+            session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
+                producedStateRefsMap.forEach { it ->
+                    val state = VaultStatesEntity().apply {
+                        txId = it.key.txhash.toString()
+                        index = it.key.index
+                        stateStatus = Vault.StateStatus.UNCONSUMED
+                        contractStateClassName = it.value.state.data.javaClass.name
+                        // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
+                        contractState = it.value.state.serialize(createKryo()).bytes
+                        notaryName = it.value.state.notary.name
+                        notaryKey = it.value.state.notary.owningKey.toBase58String()
+                        recordedTime = services.clock.instant()
+                    }
+                    insert(state)
+                }
+                consumedStateRefs.forEach { stateRef ->
+                    val queryKey = io.requery.proxy.CompositeKey(mapOf(VaultStatesEntity.TX_ID to stateRef.txhash.toString(),
+                            VaultStatesEntity.INDEX to stateRef.index))
+                    val state = findByKey(VaultStatesEntity::class, queryKey)
+                    state?.run {
+                        stateStatus = Vault.StateStatus.CONSUMED
+                        consumedTime = services.clock.instant()
+                        // remove lock (if held)
+                        lockId?.let {
+                            lockId = null
+                            lockUpdateTime = services.clock.instant()
+                            log.trace("Releasing soft lock on consumed state: $stateRef")
+                        }
+                        update(state)
+                    }
+                }
+            }
+        }
+        return update
+    }
+
+    // TODO: consider moving this logic outside the vault
+    private fun maybeUpdateCashBalances(update: Vault.Update) {
+        if (update.containsType<Cash.State>()) {
+            val consumed = sumCashStates(update.consumed)
+            val produced = sumCashStates(update.produced)
+            (produced.keys + consumed.keys).map { currency ->
+                val producedAmount = produced[currency] ?: Amount(0, currency)
+                val consumedAmount = consumed[currency] ?: Amount(0, currency)
+
+                val cashBalanceEntity = VaultCashBalancesEntity()
+                cashBalanceEntity.currency = currency.currencyCode
+                cashBalanceEntity.amount = producedAmount.quantity - consumedAmount.quantity
 
                 session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
-                    producedStateRefsMap.forEach { it ->
-                        val state = VaultStatesEntity().apply {
-                            txId = it.key.txhash.toString()
-                            index = it.key.index
-                            stateStatus = Vault.StateStatus.UNCONSUMED
-                            contractStateClassName = it.value.state.data.javaClass.name
-                            contractState = it.value.state.serialize(storageKryo()).bytes
-                            notaryName = it.value.state.notary.name
-                            notaryKey = it.value.state.notary.owningKey.toBase58String()
-                            recordedTime = services.clock.instant()
-                        }
-                        insert(state)
+                    val state = findByKey(VaultCashBalancesEntity::class, currency.currencyCode)
+                    state?.run {
+                        amount += producedAmount.quantity - consumedAmount.quantity
                     }
-                    consumedStateRefs.forEach { stateRef ->
-                        val queryKey = io.requery.proxy.CompositeKey(mapOf(VaultStatesEntity.TX_ID to stateRef.txhash.toString(),
-                                                                           VaultStatesEntity.INDEX to stateRef.index))
-                        val state = findByKey(VaultStatesEntity::class, queryKey)
-                        state?.run {
-                            stateStatus = Vault.StateStatus.CONSUMED
-                            consumedTime = services.clock.instant()
-                            update(state)
-                        }
-                    }
-                }
-            }
-            return update
-        }
-
-        // TODO: consider moving this logic outside the vault
-        fun maybeUpdateCashBalances(update: Vault.Update) {
-            if (update.containsType<Cash.State>()) {
-                val consumed = sumCashStates(update.consumed)
-                val produced = sumCashStates(update.produced)
-                (produced.keys + consumed.keys).map { currency ->
-                    val producedAmount = produced[currency] ?: Amount(0, currency)
-                    val consumedAmount = consumed[currency] ?: Amount(0, currency)
-
-                    val cashBalanceEntity = VaultCashBalancesEntity()
-                    cashBalanceEntity.currency = currency.currencyCode
-                    cashBalanceEntity.amount = producedAmount.quantity - consumedAmount.quantity
-
-                    session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
-                        val state = findByKey(VaultCashBalancesEntity::class, currency.currencyCode)
-                        state?.run {
-                            amount += producedAmount.quantity - consumedAmount.quantity
-                        }
-                        upsert(state ?: cashBalanceEntity)
-                    }
+                    upsert(state ?: cashBalanceEntity)
+                    log.trace("Updating Cash balance for $currency by ${cashBalanceEntity.amount}")
                 }
             }
         }
+    }
 
-        @Suppress("UNCHECKED_CAST")
-        private fun sumCashStates(states: Iterable<StateAndRef<ContractState>>): Map<Currency, Amount<Currency>> {
-            return states.mapNotNull { (it.state.data as? FungibleAsset<Currency>)?.amount }
-                    .groupBy { it.token.product }
-                    .mapValues { it.value.map { Amount(it.quantity, it.token.product) }.sumOrThrow() }
-        }
-    })
+    @Suppress("UNCHECKED_CAST")
+    private fun sumCashStates(states: Iterable<StateAndRef<ContractState>>): Map<Currency, Amount<Currency>> {
+        return states.mapNotNull { (it.state.data as? FungibleAsset<Currency>)?.amount }
+                .groupBy { it.token.product }
+                .mapValues { it.value.map { Amount(it.quantity, it.token.product) }.sumOrThrow() }
+    }
 
     override val cashBalances: Map<Currency, Amount<Currency>> get() {
         val cashBalancesByCurrency =
@@ -151,15 +163,17 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
-    override fun <T: ContractState> states(clazzes: Set<Class<T>>, statuses: EnumSet<Vault.StateStatus>): Iterable<StateAndRef<T>> {
+    override fun <T: ContractState> states(clazzes: Set<Class<T>>, statuses: EnumSet<Vault.StateStatus>, includeSoftLockedStates: Boolean): Iterable<StateAndRef<T>> {
         val stateAndRefs =
             session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
-                var result = select(VaultSchema.VaultStates::class)
+                var query = select(VaultSchema.VaultStates::class)
                                 .where(VaultSchema.VaultStates::stateStatus `in` statuses)
                 // TODO: temporary fix to continue supporting track() function (until becomes Typed)
                 if (!clazzes.map {it.name}.contains(ContractState::class.java.name))
-                    result.and (VaultSchema.VaultStates::contractStateClassName `in` (clazzes.map { it.name }))
-                val iterator = result.get().iterator()
+                    query.and (VaultSchema.VaultStates::contractStateClassName `in` (clazzes.map { it.name }))
+                if (!includeSoftLockedStates)
+                    query.and(VaultSchema.VaultStates::lockId.isNull())
+                val iterator = query.get().iterator()
                 Sequence{iterator}
                         .map { it ->
                             val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
@@ -195,9 +209,9 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         val ourKeys = services.keyManagementService.keys.keys
         val netDelta = txns.fold(Vault.NoUpdate) { netDelta, txn -> netDelta + makeUpdate(txn, ourKeys) }
         if (netDelta != Vault.NoUpdate) {
+            recordUpdate(netDelta)
+            maybeUpdateCashBalances(netDelta)
             mutex.locked {
-                recordUpdate(netDelta)
-                maybeUpdateCashBalances(netDelta)
                 updatesPublisher.onNext(netDelta)
             }
         }
@@ -218,10 +232,189 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
+    override fun softLockReserve(id: UUID, stateRefs: Set<StateRef>) {
+        if (stateRefs.isNotEmpty()) {
+            val stateRefsAsStr = stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
+            // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
+            val updateStatement = """
+                UPDATE VAULT_STATES SET lock_id = '$id', lock_timestamp = '${services.clock.instant()}'
+                WHERE ((transaction_id, output_index) IN ($stateRefsAsStr));
+            """
+            val statement = configuration.jdbcSession().createStatement()
+            log.debug(updateStatement)
+            try {
+                val rs = statement.executeUpdate(updateStatement)
+                if (rs > 0) {
+                    log.trace("Reserving soft lock states for $id: $stateRefs")
+                }
+                statement.close()
+            }
+            catch (e: SQLException) {
+                log.error("""soft lock update error attempting to reserve states: $stateRefs for $id
+                            $e.
+                        """)
+            }
+            finally { statement.close() }
+        }
+    }
+
+    override fun softLockRelease(id: UUID, stateRefs: Set<StateRef>?) {
+        stateRefs?.let {
+            if (stateRefs.isNotEmpty()) {
+                val stateRefsAsStr = stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
+                // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
+                val updateStatement = """
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE ((transaction_id, output_index) IN ($stateRefsAsStr));
+                """
+                val statement = configuration.jdbcSession().createStatement()
+                log.debug(updateStatement)
+                try {
+                    val rs = statement.executeUpdate(updateStatement)
+                    if (rs > 0) {
+                        log.trace("Releasing ${stateRefs.count()} soft locked states for $id: $stateRefs")
+                    }
+                } catch (e: SQLException) {
+                    log.error("""soft lock update error attempting to release states: $stateRefs for $id
+                            $e.
+                        """)
+                }
+                finally { statement.close() }
+            }
+        }
+
+        if (stateRefs == null) {
+            val updateStatement = """
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE (lock_id = '$id');
+                """
+            val statement = configuration.jdbcSession().createStatement()
+            log.debug(updateStatement)
+            try {
+                val rs = statement.executeUpdate(updateStatement)
+                if (rs > 0) {
+                    log.trace("Releasing all soft locked states for $id") //: ${softLockedStates[id]}")
+                }
+            } catch (e: SQLException) {
+                log.error("""soft lock update error attempting to release all states for $id
+                            $e.
+                        """)
+            }
+            finally { statement.close() }
+        }
+    }
+
+    fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AnonymousParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
+
+        val issuerKeysStr =
+            onlyFromIssuerParties?.let {
+                it.fold("") { issuerKeysStr, it -> issuerKeysStr + "('${it.owningKey.toBase58String()}')," }.dropLast(1)
+            }
+
+        // TODO: Need to provide a database provider independent means of performing this function.
+        //       We are using an H2 specific means of selecting a minimum set of rows that match a request amount of coins:
+        //       1) There is no standard SQL mechanism of calculating a cumulative total on a field and restricting row selection on the
+        //          running total of such an accumulator
+        //       2) H2 uses session variables to perform this accumulator function:
+        //          http://www.h2database.com/html/functions.html#set
+        //       3) H2 does not support JOIN's in FOR UPDATE (hence we are forced to execute 2 queries)
+        mutex.locked {
+            val statement = configuration.jdbcSession().createStatement()
+            try {
+                statement.execute("CALL SET(@t, 0);")
+
+                val selectJoin = """
+                SELECT vs.transaction_id, vs.output_index, SET(@t, ifnull(@t,0)+ccs.pennies) total_pennies
+                FROM vault_states AS vs, contract_cash_states AS ccs
+                WHERE vs.transaction_id = ccs.transaction_id AND vs.output_index = ccs.output_index
+                AND vs.state_status = 0
+                AND ccs.ccy_code = '${amount.token}' and @t <= ${amount.quantity}
+            """ +
+                        (if (notary != null)
+                            " AND vs.notary_key = '${notary.owningKey.toBase58String()}'" else "") +
+                        (if (issuerKeysStr != null)
+                            " AND ccs.issuer_key IN $issuerKeysStr" else "") +
+                        (if (lockId != null)
+                            " AND (vs.lock_id is null OR vs.lock_id = '$lockId')"
+                        else " AND vs.lock_id is null")
+
+                // Retrieve spendable state refs
+                var stateRefs = mutableListOf<StateRef>()
+                val rs1 = statement.executeQuery(selectJoin)
+                log.debug(selectJoin)
+                while (rs1.next()) {
+                    val txHash = SecureHash.parse(rs1.getString(1))
+                    val index = rs1.getInt(2)
+                    stateRefs.add(StateRef(txHash, index))
+                }
+
+                if (stateRefs.isNotEmpty()) {
+                    val stateRefsAsStr = stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
+                    // TODO: upgrade to Requery 1.2.0 and rewrite with Requery DSL (https://github.com/requery/requery/issues/434)
+                    val selectForUpdateStatement = """
+                    SELECT transaction_id, output_index, contract_state, notary_name, notary_key
+                    FROM vault_states
+                    WHERE (transaction_id, output_index) IN ($stateRefsAsStr)
+                    FOR UPDATE
+                """
+                    // Retrieve locked states
+                    var lockStates = mutableListOf<StateAndRef<T>>()
+                    val rs = statement.executeQuery(selectForUpdateStatement)
+                    log.debug(selectForUpdateStatement)
+                    while (rs.next()) {
+                        val txHash = SecureHash.parse(rs.getString(1))
+                        val index = rs.getInt(2)
+                        val stateRef = StateRef(txHash, index)
+                        // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
+                        val state = rs.getBytes(3).deserialize<TransactionState<T>>(createKryo())
+                        lockStates.add(StateAndRef(state, stateRef))
+                    }
+                    log.trace("Locked ${lockStates.count()} rows FOR UPDATE with states: ${lockStates}")
+
+                    return lockStates
+                }
+            } catch (e: SQLException) {
+                log.error("""Failed retrieving unconsumed states for: amount [$amount], onlyFromIssuerParties [$onlyFromIssuerParties], notary [$notary], lockId [$lockId]
+                            $e.
+                        """)
+            }
+            finally { statement.close() }
+        }
+
+        log.warn("No spendable states identified for $amount")
+        return emptyList()
+    }
+
+    override fun <T : ContractState> softLockedStates(lockId: UUID?): List<StateAndRef<T>> {
+        val stateAndRefs =
+                session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
+                    var query = select(VaultSchema.VaultStates::class)
+                            .where(VaultSchema.VaultStates::stateStatus eq Vault.StateStatus.UNCONSUMED)
+                            .and(VaultSchema.VaultStates::contractStateClassName eq Cash.State::class.java.name)
+                    if (lockId != null)
+                        query.and(VaultSchema.VaultStates::lockId eq lockId)
+                    else
+                        query.and(VaultSchema.VaultStates::lockId.notNull())
+                    query.get()
+                            .map { it ->
+                                val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
+                                // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
+                                val state = it.contractState.deserialize<TransactionState<T>>(createKryo())
+                                StateAndRef(state, stateRef)
+                            }.toList()
+                }
+        return stateAndRefs
+    }
+
+    /**
+     * Generate a transaction that moves an amount of currency to the given pubkey.
+     *
+     * @param onlyFromParties if non-null, the asset states will be filtered to only include those issued by the set
+     *                        of given parties. This can be useful if the party you're trying to pay has expectations
+     *                        about which type of asset claims they are willing to accept.
+     */
     override fun generateSpend(tx: TransactionBuilder,
                                amount: Amount<Currency>,
                                to: CompositeKey,
-                               onlyFromParties: Set<AbstractParty>?): Pair<TransactionBuilder, List<CompositeKey>> {
+                               onlyFromParties: Set<AnonymousParty>?): Pair<TransactionBuilder, List<CompositeKey>> {
         // Discussion
         //
         // This code is analogous to the Wallet.send() set of methods in bitcoinj, and has the same general outline.
@@ -242,30 +435,28 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         //
         // Finally, we add the states to the provided partial transaction.
 
-        val assetsStates = unconsumedStates<Cash.State>()
+        // retrieve unspent and unlocked cash states that meet out spending criteria
+        val acceptableCoins = unconsumedStatesForSpending<Cash.State>(amount, onlyFromParties, tx.notary, tx.lockId)
 
-        val currency = amount.token
-        var acceptableCoins = run {
-            val ofCurrency = assetsStates.filter { it.state.data.amount.token.product == currency }
-            if (onlyFromParties != null)
-                ofCurrency.filter { it.state.data.amount.token.issuer.party in onlyFromParties }
-            else
-                ofCurrency
-        }
-        tx.notary = acceptableCoins.firstOrNull()?.state?.notary
         // TODO: We should be prepared to produce multiple transactions spending inputs from
         // different notaries, or at least group states by notary and take the set with the
         // highest total value
-        acceptableCoins = acceptableCoins.filter { it.state.notary == tx.notary }
 
-        val (gathered, gatheredAmount) = gatherCoins(acceptableCoins, amount)
+        // notary may be associated with locked state only
+        tx.notary = acceptableCoins.firstOrNull()?.state?.notary
+
+        val gatheredCoins = gatherCoins(acceptableCoins, amount)
+        val gathered = gatheredCoins.first
+        val gatheredAmount = gatheredCoins.second
+        softLockReserve(tx.lockId, gathered.map { it.ref }.toSet())
+
         val takeChangeFrom = gathered.firstOrNull()
         val change = if (takeChangeFrom != null && gatheredAmount > amount) {
             Amount(gatheredAmount.quantity - amount.quantity, takeChangeFrom.state.data.amount.token)
         } else {
             null
         }
-        val keysUsed = gathered.map { it.state.data.owner }.toSet()
+        val keysUsed = gathered.map { it.state.data.owner }
 
         val states = gathered.groupBy { it.state.data.amount.token.issuer }.map {
             val coins = it.value
@@ -293,15 +484,14 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         for (state in outputs) tx.addOutputState(state)
 
         // What if we already have a move command with the right keys? Filter it out here or in platform code?
-        val keysList = keysUsed.toList()
-        tx.addCommand(Cash().generateMoveCommand(), keysList)
+        tx.addCommand(Cash().generateMoveCommand(), keysUsed)
 
         // update Vault
         //        notify(tx.toWireTransaction())
         // Vault update must be completed AFTER transaction is recorded to ledger storage!!!
         // (this is accomplished within the recordTransaction function)
 
-        return Pair(tx, keysList)
+        return Pair(tx, keysUsed)
     }
 
     private fun deriveState(txState: TransactionState<Cash.State>, amount: Amount<Issued<Currency>>, owner: CompositeKey)
@@ -325,8 +515,12 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             gatheredAmount += Amount(c.state.data.amount.quantity, amount.token)
         }
 
-        if (gatheredAmount < amount)
+        if (gatheredAmount < amount) {
+            log.trace("Insufficient balance: requested $amount, available $gatheredAmount}")
             throw InsufficientBalanceException(amount - gatheredAmount)
+        }
+
+        log.trace("Gathered coins: requested $amount, available $gatheredAmount, change: ${gatheredAmount - amount}}")
 
         return Pair(gathered, gatheredAmount)
     }
@@ -343,16 +537,24 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             // TODO: using native JDBC until requery supports SELECT WHERE COMPOSITE_KEY IN
             // https://github.com/requery/requery/issues/434
             val statement = configuration.jdbcSession().createStatement()
-            val rs = statement.executeQuery("SELECT transaction_id, output_index, contract_state " +
-                    "FROM vault_states " +
-                    "WHERE ((transaction_id, output_index) IN ($stateRefs)) " +
-                    "AND (state_status = 0)")
-            while (rs.next()) {
-                val txHash = SecureHash.parse(rs.getString(1))
-                val index = rs.getInt(2)
-                val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(storageKryo())
-                consumedStates.add(StateAndRef(state, StateRef(txHash, index)))
+            try {
+                // TODO: upgrade to Requery 1.2.0 and rewrite with Requery DSL (https://github.com/requery/requery/issues/434)
+                val rs = statement.executeQuery("SELECT transaction_id, output_index, contract_state " +
+                        "FROM vault_states " +
+                        "WHERE ((transaction_id, output_index) IN ($stateRefs)) " +
+                        "AND (state_status = 0)")
+                while (rs.next()) {
+                    val txHash = SecureHash.parse(rs.getString(1))
+                    val index = rs.getInt(2)
+                    val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(createKryo())
+                    consumedStates.add(StateAndRef(state, StateRef(txHash, index)))
+                }
+            } catch (e: SQLException) {
+                log.error("""Failed retrieving state refs for: $stateRefs
+                            $e.
+                        """)
             }
+            finally { statement.close() }
         }
 
         // Is transaction irrelevant?

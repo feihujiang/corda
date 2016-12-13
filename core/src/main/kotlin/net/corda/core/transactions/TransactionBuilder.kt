@@ -27,6 +27,7 @@ import java.util.*
 open class TransactionBuilder(
         protected val type: TransactionType = TransactionType.General(),
         var notary: Party? = null,
+        var lockId: UUID = UUID.randomUUID(),
         protected val inputs: MutableList<StateRef> = arrayListOf(),
         protected val attachments: MutableList<SecureHash> = arrayListOf(),
         protected val outputs: MutableList<TransactionState<ContractState>> = arrayListOf(),
@@ -127,7 +128,7 @@ open class TransactionBuilder(
     }
 
     fun toWireTransaction() = WireTransaction(ArrayList(inputs), ArrayList(attachments),
-            ArrayList(outputs), ArrayList(commands), notary, signers.toList(), type, timestamp)
+            ArrayList(outputs), ArrayList(commands), notary, signers.toList(), type, timestamp, lockId)
 
     fun toSignedTransaction(checkSufficientSignatures: Boolean = true): SignedTransaction {
         if (checkSufficientSignatures) {

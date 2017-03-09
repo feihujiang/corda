@@ -11,7 +11,6 @@ import net.corda.core.crypto.NullPublicKey
 import net.corda.core.crypto.SecureHash
 import net.corda.core.node.services.Vault
 import net.corda.core.serialization.serialize
-import net.corda.core.serialization.storageKryo
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.WireTransaction
 import net.corda.core.utilities.DUMMY_NOTARY

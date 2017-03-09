@@ -9,18 +9,12 @@ import net.corda.contracts.asset.Cash
 import net.corda.core.ThreadBox
 import net.corda.core.bufferUntilSubscribed
 import net.corda.core.contracts.*
-import net.corda.core.crypto.AnonymousParty
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
-import net.corda.core.crypto.SecureHash
+import net.corda.core.crypto.*
 import net.corda.core.node.ServiceHub
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.VaultService
 import net.corda.core.node.services.unconsumedStates
-import net.corda.core.serialization.SingletonSerializeAsToken
-import net.corda.core.serialization.deserialize
-import net.corda.core.serialization.serialize
-import net.corda.core.serialization.storageKryo
+import net.corda.core.serialization.*
 import net.corda.core.tee
 import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.transactions.WireTransaction
@@ -81,7 +75,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         stateStatus = Vault.StateStatus.UNCONSUMED
                         contractStateClassName = it.value.state.data.javaClass.name
                         // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
-                        contractState = it.value.state.serialize(createKryo()).bytes
+                        contractState = it.value.state.serialize(threadLocalStorageKryo()).bytes
                         notaryName = it.value.state.notary.name
                         notaryKey = it.value.state.notary.owningKey.toBase58String()
                         recordedTime = services.clock.instant()
@@ -177,7 +171,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 Sequence{iterator}
                         .map { it ->
                             val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
-                            val state = it.contractState.deserialize<TransactionState<T>>(storageKryo())
+                            val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
                             StateAndRef(state, stateRef)
                         }
             }
@@ -234,7 +228,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
 
     override fun softLockReserve(id: UUID, stateRefs: Set<StateRef>) {
         if (stateRefs.isNotEmpty()) {
-            val stateRefsAsStr = stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
+            val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
             // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
             val updateStatement = """
                 UPDATE VAULT_STATES SET lock_id = '$id', lock_timestamp = '${services.clock.instant()}'
@@ -259,50 +253,40 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     }
 
     override fun softLockRelease(id: UUID, stateRefs: Set<StateRef>?) {
-        stateRefs?.let {
-            if (stateRefs.isNotEmpty()) {
-                val stateRefsAsStr = stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
-                // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
-                val updateStatement = """
-                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE ((transaction_id, output_index) IN ($stateRefsAsStr));
-                """
-                val statement = configuration.jdbcSession().createStatement()
-                log.debug(updateStatement)
-                try {
-                    val rs = statement.executeUpdate(updateStatement)
-                    if (rs > 0) {
-                        log.trace("Releasing ${stateRefs.count()} soft locked states for $id: $stateRefs")
-                    }
-                } catch (e: SQLException) {
-                    log.error("""soft lock update error attempting to release states: $stateRefs for $id
-                            $e.
-                        """)
-                }
-                finally { statement.close() }
-            }
-        }
 
-        if (stateRefs == null) {
-            val updateStatement = """
+        val updateStatement =
+            if (stateRefs == null) {
+                """
                     UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE (lock_id = '$id');
                 """
+            }
+            else if (stateRefs.isNotEmpty()) {
+                val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
+                // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
+                """
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE ((transaction_id, output_index) IN ($stateRefsAsStr));
+                """
+            } else {""}
+
+        if (updateStatement.isNotEmpty()) {
             val statement = configuration.jdbcSession().createStatement()
             log.debug(updateStatement)
             try {
                 val rs = statement.executeUpdate(updateStatement)
                 if (rs > 0) {
-                    log.trace("Releasing all soft locked states for $id") //: ${softLockedStates[id]}")
+                    log.trace("Releasing soft locked states for $id (stateRefs [$stateRefs])")
                 }
             } catch (e: SQLException) {
-                log.error("""soft lock update error attempting to release all states for $id
-                            $e.
-                        """)
+                log.error("""soft lock update error attempting to release states for $id (stateRefs [$stateRefs])
+                        $e.
+                    """)
+            } finally {
+                statement.close()
             }
-            finally { statement.close() }
         }
     }
 
-    fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AnonymousParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
+    fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
 
         val issuerKeysStr =
             onlyFromIssuerParties?.let {
@@ -347,7 +331,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 }
 
                 if (stateRefs.isNotEmpty()) {
-                    val stateRefsAsStr = stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
+                    val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs)
                     // TODO: upgrade to Requery 1.2.0 and rewrite with Requery DSL (https://github.com/requery/requery/issues/434)
                     val selectForUpdateStatement = """
                     SELECT transaction_id, output_index, contract_state, notary_name, notary_key
@@ -364,7 +348,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         val index = rs.getInt(2)
                         val stateRef = StateRef(txHash, index)
                         // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
-                        val state = rs.getBytes(3).deserialize<TransactionState<T>>(createKryo())
+                        val state = rs.getBytes(3).deserialize<TransactionState<T>>(threadLocalStorageKryo())
                         lockStates.add(StateAndRef(state, stateRef))
                     }
                     log.trace("Locked ${lockStates.count()} rows FOR UPDATE with states: ${lockStates}")
@@ -397,7 +381,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                             .map { it ->
                                 val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
                                 // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
-                                val state = it.contractState.deserialize<TransactionState<T>>(createKryo())
+                                val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
                                 StateAndRef(state, stateRef)
                             }.toList()
                 }
@@ -414,7 +398,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     override fun generateSpend(tx: TransactionBuilder,
                                amount: Amount<Currency>,
                                to: CompositeKey,
-                               onlyFromParties: Set<AnonymousParty>?): Pair<TransactionBuilder, List<CompositeKey>> {
+                               onlyFromParties: Set<AbstractParty>?): Pair<TransactionBuilder, List<CompositeKey>> {
         // Discussion
         //
         // This code is analogous to the Wallet.send() set of methods in bitcoinj, and has the same general outline.
@@ -533,7 +517,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         // Retrieve all unconsumed states for this transaction's inputs
         val consumedStates = HashSet<StateAndRef<ContractState>>()
         if (tx.inputs.isNotEmpty()) {
-            val stateRefs = tx.inputs.fold("") { stateRefs, it -> stateRefs + "('${it.txhash}','${it.index}')," }.dropLast(1)
+            val stateRefs = stateRefsToCompositeKeyStr(tx.inputs)
             // TODO: using native JDBC until requery supports SELECT WHERE COMPOSITE_KEY IN
             // https://github.com/requery/requery/issues/434
             val statement = configuration.jdbcSession().createStatement()
@@ -546,7 +530,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 while (rs.next()) {
                     val txHash = SecureHash.parse(rs.getString(1))
                     val index = rs.getInt(2)
-                    val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(createKryo())
+                    val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(threadLocalStorageKryo())
                     consumedStates.add(StateAndRef(state, StateRef(txHash, index)))
                 }
             } catch (e: SQLException) {
@@ -588,5 +572,12 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     // It's potentially of interest to the vault
         is LinearState -> state.isRelevant(ourKeys)
         else -> false
+    }
+
+    /**
+     * Helper method to generate a string formatted list of Composite Keys for SQL IN clause
+     */
+    private fun stateRefsToCompositeKeyStr(stateRefs: List<StateRef>): String {
+        return stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
     }
 }

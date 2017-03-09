@@ -5,11 +5,11 @@ Soft Locking is implemented in the vault to prevent multiple transactions trying
 Violation of a soft lock would result in a double spend being created and rejected by the notary.
 
 Soft locks are automatically applied to coin selection (eg. cash spending) to ensure that no two transactions attempt to 
-spend the same fungible states. The outcome of such an eventuality will result in an ``InsuficientBalanceException`` for one
+spend the same fungible states. The outcome of such an eventuality will result in an ``InsufficientBalanceException`` for one
 of the requesters if there are insufficient number of fungible states available to satisfy both requests.
 
 .. note:: The Cash Contract schema table is now automatically generated upon node startup as Coin Selection now uses
-          this table to ensure correct locking and selection of states to satisty minimum requested spending amounts.
+          this table to ensure correct locking and selection of states to satisfy minimum requested spending amounts.
 
 In addition, the ``VaultService`` exposes a number of functions a developer may use to explicitly reserve, release and
 query soft locks associated with states as required by their CorDapp application logic:

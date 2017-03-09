@@ -33,8 +33,7 @@ class WireTransaction(
         notary: Party?,
         signers: List<CompositeKey>,
         type: TransactionType,
-        timestamp: Timestamp?,
-        val lockId: UUID = UUID.randomUUID()
+        timestamp: Timestamp?
 ) : BaseTransaction(inputs, outputs, notary, signers, type, timestamp), TraversableTransaction {
     init {
         checkInvariants()

@@ -128,7 +128,7 @@ open class TransactionBuilder(
     }
 
     fun toWireTransaction() = WireTransaction(ArrayList(inputs), ArrayList(attachments),
-            ArrayList(outputs), ArrayList(commands), notary, signers.toList(), type, timestamp, lockId)
+            ArrayList(outputs), ArrayList(commands), notary, signers.toList(), type, timestamp)
 
     fun toSignedTransaction(checkSufficientSignatures: Boolean = true): SignedTransaction {
         if (checkSufficientSignatures) {

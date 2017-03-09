@@ -305,9 +305,11 @@ class CommercialPaperTestsGeneric {
         }
 
         databaseTransaction(databaseBigCorp) {
+            val tooEarlyRedemptionLockId = UUID.randomUUID()
             fun makeRedeemTX(time: Instant): SignedTransaction {
                 val ptx = TransactionType.General.Builder(DUMMY_NOTARY)
                 ptx.setTime(time, 30.seconds)
+                ptx.lockId = tooEarlyRedemptionLockId
                 CommercialPaper().generateRedeem(ptx, moveTX.tx.outRef(1), bigCorpVaultService)
                 ptx.signWith(aliceServices.key)
                 ptx.signWith(bigCorpServices.key)
@@ -320,7 +322,7 @@ class CommercialPaperTestsGeneric {
                 tooEarlyRedemption.toLedgerTransaction(aliceServices).verify()
             }
             // manually release locks held by this failing transaction
-            aliceServices.vaultService.softLockRelease(tooEarlyRedemption.tx.lockId)
+            aliceServices.vaultService.softLockRelease(tooEarlyRedemptionLockId)
             assertTrue(e.cause!!.message!!.contains("paper must have matured"))
 
             val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days)

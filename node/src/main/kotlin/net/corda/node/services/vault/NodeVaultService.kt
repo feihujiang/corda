@@ -10,6 +10,7 @@ import net.corda.core.ThreadBox
 import net.corda.core.bufferUntilSubscribed
 import net.corda.core.contracts.*
 import net.corda.core.crypto.*
+import net.corda.core.flows.FlowException
 import net.corda.core.node.ServiceHub
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.VaultService
@@ -232,16 +233,18 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
             val updateStatement = """
                 UPDATE VAULT_STATES SET lock_id = '$id', lock_timestamp = '${services.clock.instant()}'
-                WHERE ((transaction_id, output_index) IN ($stateRefsAsStr));
+                WHERE ((transaction_id, output_index) IN ($stateRefsAsStr))
+                AND (state_status = 0)
+                AND ((lock_id is null) OR (lock_id = '$id'));
             """
             val statement = configuration.jdbcSession().createStatement()
             log.debug(updateStatement)
             try {
                 val rs = statement.executeUpdate(updateStatement)
-                if (rs > 0) {
+                if (rs > 0 && rs == stateRefs.size) {
                     log.trace("Reserving soft lock states for $id: $stateRefs")
                 }
-                statement.close()
+                else throw SoftLockingException("Attempted to reserve $stateRefs for $id but only $rs rows available")
             }
             catch (e: SQLException) {
                 log.error("""soft lock update error attempting to reserve states: $stateRefs for $id
@@ -257,14 +260,17 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         val updateStatement =
             if (stateRefs == null) {
                 """
-                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE (lock_id = '$id');
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}'
+                    WHERE (state_status = 0) AND (lock_id = '$id');
                 """
             }
             else if (stateRefs.isNotEmpty()) {
                 val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
                 // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
                 """
-                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}' WHERE ((transaction_id, output_index) IN ($stateRefsAsStr));
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}'
+                    WHERE (transaction_id, output_index) IN ($stateRefsAsStr)
+                    AND (state_status = 0) AND (lock_id = '$id');
                 """
             } else {""}
 
@@ -274,10 +280,10 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             try {
                 val rs = statement.executeUpdate(updateStatement)
                 if (rs > 0) {
-                    log.trace("Releasing soft locked states for $id (stateRefs [$stateRefs])")
+                    log.trace("Releasing $rs soft locked states for $id ${stateRefs ?: ""}")
                 }
             } catch (e: SQLException) {
-                log.error("""soft lock update error attempting to release states for $id (stateRefs [$stateRefs])
+                log.error("""soft lock update error attempting to release states for $id ${stateRefs ?: ""}")
                         $e.
                     """)
             } finally {
@@ -580,4 +586,8 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     private fun stateRefsToCompositeKeyStr(stateRefs: List<StateRef>): String {
         return stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
     }
+}
+
+class SoftLockingException(override val message: String?, override val cause: Throwable? = null) : FlowException(message, cause) {
+    override fun toString() = "Soft locking error: $message"
 }

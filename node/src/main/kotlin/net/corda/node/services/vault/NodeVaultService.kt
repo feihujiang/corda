@@ -1,5 +1,6 @@
 package net.corda.node.services.vault
 
+import co.paralleluniverse.strands.Strand
 import io.requery.TransactionIsolation
 import io.requery.kotlin.`in`
 import io.requery.kotlin.eq
@@ -9,19 +10,26 @@ import net.corda.contracts.asset.Cash
 import net.corda.core.ThreadBox
 import net.corda.core.bufferUntilSubscribed
 import net.corda.core.contracts.*
-import net.corda.core.crypto.*
+import net.corda.core.crypto.AbstractParty
+import net.corda.core.crypto.CompositeKey
+import net.corda.core.crypto.Party
+import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.FlowException
 import net.corda.core.node.ServiceHub
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.VaultService
 import net.corda.core.node.services.unconsumedStates
-import net.corda.core.serialization.*
+import net.corda.core.serialization.SingletonSerializeAsToken
+import net.corda.core.serialization.deserialize
+import net.corda.core.serialization.serialize
+import net.corda.core.serialization.threadLocalStorageKryo
 import net.corda.core.tee
 import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.transactions.WireTransaction
 import net.corda.core.utilities.loggerFor
 import net.corda.core.utilities.trace
 import net.corda.node.services.database.RequeryConfiguration
+import net.corda.node.services.statemachine.FlowStateMachineImpl
 import net.corda.node.services.vault.schemas.*
 import net.corda.node.utilities.bufferUntilDatabaseCommit
 import net.corda.node.utilities.wrapWithDatabaseTransaction
@@ -207,7 +215,9 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             recordUpdate(netDelta)
             maybeUpdateCashBalances(netDelta)
             mutex.locked {
-                updatesPublisher.onNext(netDelta)
+                val uuid = (Strand.currentStrand() as? FlowStateMachineImpl<*>)?.id?.uuid
+                val vaultUpdate = if (uuid != null) netDelta.copy(flowId = uuid) else netDelta
+                updatesPublisher.onNext(vaultUpdate)
             }
         }
     }

@@ -76,7 +76,6 @@ object IssuerFlow {
                                 issuerPartyRef: OpaqueBytes): SignedTransaction {
             // TODO: pass notary in as request parameter
             val notaryParty = serviceHub.networkMapCache.notaryNodes[0].notaryIdentity
-            // DOCSTART SoftLockExample
             // invoke Cash subflow to issue Asset
             progressTracker.currentStep = ISSUING
             val bankOfCordaParty = serviceHub.myInfo.legalIdentity
@@ -86,15 +85,10 @@ object IssuerFlow {
             // short-circuit when issuing to self
             if (issueTo == serviceHub.myInfo.legalIdentity)
                 return issueTx
-            // soft locking resolves race conditions caused by the 2 separate Cashflow commands (Issue and Pay) not
-            // reusing the same state references (thus causing Notarisation double spend exceptions).
-            serviceHub.vaultService.softLockReserve(runId.uuid, setOf(StateRef(issueTx.id, 0)))
             // now invoke Cash subflow to Move issued assetType to issue requester
             progressTracker.currentStep = TRANSFERRING
             val moveCashFlow = CashPaymentFlow(amount, issueTo)
             val moveTx = subFlow(moveCashFlow)
-            serviceHub.vaultService.softLockRelease(runId.uuid)
-            // DOCEND SoftLockExample
             // NOTE: CashFlow PayCash calls FinalityFlow which performs a Broadcast (which stores a local copy of the txn to the ledger)
             return moveTx
         }

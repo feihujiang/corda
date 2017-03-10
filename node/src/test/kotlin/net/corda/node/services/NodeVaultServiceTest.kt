@@ -293,25 +293,23 @@ class NodeVaultServiceTest {
         }
     }
 
-    lateinit var servicesSL: MockServices
-
     @Test
     fun `states soft locking query granularity`() {
         databaseTransaction(database) {
 
-            servicesSL.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 10, 10, Random(0L))
-            servicesSL.fillWithSomeTestCash(100.POUNDS, DUMMY_NOTARY, 10, 10, Random(0L))
-            servicesSL.fillWithSomeTestCash(100.SWISS_FRANCS, DUMMY_NOTARY, 10, 10, Random(0L))
+            services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 10, 10, Random(0L))
+            services.fillWithSomeTestCash(100.POUNDS, DUMMY_NOTARY, 10, 10, Random(0L))
+            services.fillWithSomeTestCash(100.SWISS_FRANCS, DUMMY_NOTARY, 10, 10, Random(0L))
 
-            val allStates = servicesSL.vaultService.unconsumedStates<Cash.State>()
+            val allStates = services.vaultService.unconsumedStates<Cash.State>()
             assertThat(allStates).hasSize(30)
 
             for (i in 1..5) {
-                val spendableStatesUSD = (servicesSL.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(20.DOLLARS)
+                val spendableStatesUSD = (services.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(20.DOLLARS)
                 spendableStatesUSD.forEach(::println)
-                servicesSL.vaultService.softLockReserve(UUID.randomUUID(), spendableStatesUSD.map { it.ref }.toSet())
+                services.vaultService.softLockReserve(UUID.randomUUID(), spendableStatesUSD.map { it.ref }.toSet())
             }
-            assertThat(servicesSL.vaultService.softLockedStates<Cash.State>()).hasSize(10)
+            assertThat(services.vaultService.softLockedStates<Cash.State>()).hasSize(10)
         }
     }
 

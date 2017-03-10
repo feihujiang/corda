@@ -20,7 +20,7 @@ rules in order to ensure that the issuer and reference data is preserved as the 
 
 A feature called **soft locking** provides the ability to automatically or explicitly reserve states to prevent
 multiple transactions within the same node from trying to use the same output simultaneously. Whilst this scenario would
-ultimately be detected by a notary, *soft locking* provides a mechanism of early detection of such unwarranted and
+ultimately be detected by a notary, *soft locking* provides a mechanism of early detection for such unwarranted and
 invalid scenarios. :doc:`soft-locking` describes this feature in detail.
 
 .. note:: Basic 'coin selection' is currently implemented. Future work includes fungible state optimisation (splitting and

@@ -83,7 +83,6 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         index = it.key.index
                         stateStatus = Vault.StateStatus.UNCONSUMED
                         contractStateClassName = it.value.state.data.javaClass.name
-                        // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
                         contractState = it.value.state.serialize(threadLocalStorageKryo()).bytes
                         notaryName = it.value.state.notary.name
                         notaryKey = it.value.state.notary.owningKey.toBase58String()
@@ -364,7 +363,6 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         val txHash = SecureHash.parse(rs.getString(1))
                         val index = rs.getInt(2)
                         val stateRef = StateRef(txHash, index)
-                        // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
                         val state = rs.getBytes(3).deserialize<TransactionState<T>>(threadLocalStorageKryo())
                         lockStates.add(StateAndRef(state, stateRef))
                     }
@@ -397,7 +395,6 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                     query.get()
                             .map { it ->
                                 val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
-                                // TODO: revisit Kryo bug when using THREAD_LOCAL_KYRO
                                 val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
                                 StateAndRef(state, stateRef)
                             }.toList()

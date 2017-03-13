@@ -106,7 +106,7 @@ class NodeVaultServiceTest {
 
             services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 3, 3, Random(0L))
 
-            val w1 = services1.vaultService.unconsumedStates<Cash.State>().toList()
+            val w1 = services.vaultService.unconsumedStates<Cash.State>().toList()
             assertThat(w1).hasSize(3)
 
             val stateRefs = listOf(w1[1].ref, w1[2].ref)
@@ -121,7 +121,7 @@ class NodeVaultServiceTest {
 
             services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 3, 3, Random(0L))
 
-            val unconsumedStates = services.vaultService.unconsumedStates<Cash.State>()
+            val unconsumedStates = services.vaultService.unconsumedStates<Cash.State>().toList()
             assertThat(unconsumedStates).hasSize(3)
 
             val stateRefsToSoftLock = setOf(unconsumedStates[1].ref, unconsumedStates[2].ref)

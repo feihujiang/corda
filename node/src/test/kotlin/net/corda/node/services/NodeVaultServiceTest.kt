@@ -146,11 +146,11 @@ class NodeVaultServiceTest {
 
             // soft lock release the rest by id
             services.vaultService.softLockRelease(softLockId)
-            val unlockedStates = services.vaultService.unconsumedStates<Cash.State>(includeSoftLockedStates = false)
+            val unlockedStates = services.vaultService.unconsumedStates<Cash.State>(includeSoftLockedStates = false).toList()
             assertThat(unlockedStates).hasSize(3)
 
             // should be back to original states
-            assertThat(unconsumedStates).isEqualTo(unlockedStates)
+            assertThat(unlockedStates).isEqualTo(unconsumedStates)
         }
     }
 

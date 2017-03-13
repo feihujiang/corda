@@ -266,36 +266,37 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     }
 
     override fun softLockRelease(id: UUID, stateRefs: Set<StateRef>?) {
-
-        val updateStatement =
-            if (stateRefs == null) {
-                """
-                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}'
-                    WHERE (state_status = 0) AND (lock_id = '$id');
-                """
+        if (stateRefs == null) {
+            session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
+                val update = update(VaultStatesEntity::class)
+                        .set(VaultStatesEntity.LOCK_ID, null)
+                        .set(VaultStatesEntity.LOCK_UPDATE_TIME, services.clock.instant())
+                        .where (VaultStatesEntity.STATE_STATUS eq Vault.StateStatus.UNCONSUMED)
+                        .and (VaultStatesEntity.LOCK_ID eq id.toString()).get()
+                if (update.value() > 0) {
+                    log.trace("Releasing ${update.value()} soft locked states for $id")
+                }
             }
-            else if (stateRefs.isNotEmpty()) {
-                val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
-                // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
-                """
-                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}'
-                    WHERE (transaction_id, output_index) IN ($stateRefsAsStr)
-                    AND (state_status = 0) AND (lock_id = '$id');
-                """
-            } else {""}
-
-        if (updateStatement.isNotEmpty()) {
+        }
+        else if (stateRefs.isNotEmpty()) {
+            val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
+            // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
+            val updateStatement = """
+                UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${services.clock.instant()}'
+                WHERE (transaction_id, output_index) IN ($stateRefsAsStr)
+                AND (state_status = 0) AND (lock_id = '$id');
+            """
             val statement = configuration.jdbcSession().createStatement()
             log.debug(updateStatement)
             try {
                 val rs = statement.executeUpdate(updateStatement)
                 if (rs > 0) {
-                    log.trace("Releasing $rs soft locked states for $id ${stateRefs ?: ""}")
+                    log.trace("Releasing $rs soft locked states for $id and stateRefs $stateRefs")
                 }
             } catch (e: SQLException) {
-                log.error("""soft lock update error attempting to release states for $id ${stateRefs ?: ""}")
-                        $e.
-                    """)
+                log.error("""soft lock update error attempting to release states for $id and $stateRefs")
+                $e.
+            """)
             } finally {
                 statement.close()
             }

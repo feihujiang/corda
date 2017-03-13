@@ -5,6 +5,7 @@ import io.requery.TransactionIsolation
 import io.requery.kotlin.`in`
 import io.requery.kotlin.eq
 import io.requery.kotlin.invoke
+import io.requery.kotlin.isNull
 import io.requery.rx.KotlinRxEntityStore
 import io.requery.sql.*
 import io.requery.sql.platform.Generic
@@ -526,6 +527,9 @@ class VaultSchemaTest {
         }
     }
 
+    /**
+     *  Soft locking tests
+     */
     @Test
     fun testSingleSoftLockUpdate() {
 
@@ -547,28 +551,24 @@ class VaultSchemaTest {
         // select unlocked states
         data.invoke {
             val result = select(VaultSchema.VaultStates::class) where (VaultSchema.VaultStates::txId eq stateEntity.txId)
-                                                                .and (VaultSchema.VaultStates::lockId eq "")
+                                                                .and (VaultSchema.VaultStates::lockId.isNull())
             assertEquals(0, result.get().count())
         }
 
         // release soft lock on state
-        stateEntity.apply {
-            data.invoke {
-                val query = select(VaultSchema.VaultStates::class) where (VaultSchema.VaultStates::txId eq stateEntity.txId)
-                                                                    .and(VaultSchema.VaultStates::lockId eq "LOCK#1")
-                val result = query.get()
-                assertEquals(1, result.count())
-                val stateEntity = result.first()
-                stateEntity.lockId = ""
-                stateEntity.lockUpdateTime = Instant.now()
-                upsert(stateEntity)
-            }
+        data.invoke {
+            val update = update(VaultStatesEntity::class)
+                    .set(VaultStatesEntity.LOCK_ID, null)
+                    .set(VaultStatesEntity.LOCK_UPDATE_TIME, Instant.now())
+                    .where (VaultStatesEntity.STATE_STATUS eq Vault.StateStatus.UNCONSUMED)
+                    .and (VaultStatesEntity.LOCK_ID eq "LOCK#1").get()
+            assertEquals(1, update.value())
         }
 
         // select unlocked states
         data.invoke {
             val result = select(VaultSchema.VaultStates::class) where (VaultSchema.VaultStates::txId eq stateEntity.txId)
-                    .and (VaultSchema.VaultStates::lockId eq "")
+                    .and (VaultSchema.VaultStates::lockId.isNull())
             assertEquals(1, result.get().count())
         }
     }

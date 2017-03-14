@@ -22,8 +22,8 @@ query soft locks associated with states as required by their CorDapp application
     :start-after: DOCSTART SoftLockAPI
     :end-before: DOCEND SoftLockAPI
 
-The general purpose API function for retrieving states has also been enhanced to include a flag indicating whether soft locked
-states should be included:
+You can also control whether soft locked states are retrieved in general vault queries by setting an optional boolean
+`includeSoftLockedStates` flag (which is set to *true* by default)
 
 .. literalinclude:: ../../core/src/main/kotlin/net/corda/core/node/services/Services.kt
     :language: kotlin
@@ -41,7 +41,7 @@ new ``lockId`` field for the purpose of tracking lockable states. By default, it
 ``UUID`` (outside of a flow) or to a flow's unique ID (within a flow).
 
 Upon building a new transaction to perform some action for a set of states on a contract, a developer must explicitly
-register any states they may wish to hold for the duration of that transaction. These states will be effectively 'soft
+register any states they may wish to hold until that transaction is committed to the ledger. These states will be effectively 'soft
 locked' (not usable by any other transaction) until the developer explicitly releases these or the flow terminates or errors 
 (at which point they are automatically released).
 

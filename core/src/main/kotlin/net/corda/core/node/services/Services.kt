@@ -3,12 +3,14 @@ package net.corda.core.node.services
 import com.google.common.util.concurrent.ListenableFuture
 import net.corda.core.contracts.*
 import net.corda.core.crypto.*
+import net.corda.core.flows.FlowException
 import net.corda.core.serialization.CordaSerializable
 import net.corda.core.toFuture
 import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.transactions.WireTransaction
 import rx.Observable
 import java.io.InputStream
+import java.lang.Iterable
 import java.security.KeyPair
 import java.security.PrivateKey
 import java.security.PublicKey
@@ -221,14 +223,17 @@ interface VaultService {
      * Reserve a set of [StateRef] for a given [UUID] unique identifier.
      * Typically, the unique identifier will refer to a Flow id associated with a [Transaction] in an in-flight flow.
      * In the case of Coin Selection, soft locks are automatically taken upon gathering relevant unconsumed input refs.
+     *
+     * @throws [NoStatesAvailableException] when not possible to soft lock all of requested [StateRef]
      */
+    @Throws(NoStatesAvailableException::class)
     fun softLockReserve(id: UUID, stateRefs: Set<StateRef>)
 
     /**
      * Release all or an explicitly specified set of [StateRef] for a given [UUID] unique identifier.
      * A vault soft lock manager is automatically notified of a Flows that are terminated, such that any soft locked states
      * may be released.
-     * In the case of Coin Selection, soft locks are automatically released once previously gathered unconsumed input refs
+     * In the case of coin selection, softLock are automatically released once previously gathered unconsumed input refs
      * are consumed as part of cash spending.
      */
     fun softLockRelease(id: UUID, stateRefs: Set<StateRef>? = null)
@@ -255,6 +260,10 @@ inline fun <reified T : LinearState> VaultService.linearHeadsOfType() =
 
 inline fun <reified T : DealState> VaultService.dealsWith(party: AbstractParty) = linearHeadsOfType<T>().values.filter {
     it.state.data.parties.any { it == party }
+}
+
+class NoStatesAvailableException(override val message: String?, override val cause: Throwable? = null) : FlowException(message, cause) {
+    override fun toString() = "Soft locking error: $message"
 }
 
 /**

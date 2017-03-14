@@ -98,7 +98,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         stateStatus = Vault.StateStatus.CONSUMED
                         consumedTime = services.clock.instant()
                         // remove lock (if held)
-                        lockId?.let {
+                        if (lockId != null) {
                             lockId = null
                             lockUpdateTime = services.clock.instant()
                             log.trace("Releasing soft lock on consumed state: $stateRef")
@@ -253,7 +253,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 if (rs > 0 && rs == stateRefs.size) {
                     log.trace("Reserving soft lock states for $id: $stateRefs")
                 }
-                else throw SoftLockingException("Attempted to reserve $stateRefs for $id but only $rs rows available")
+                else throw NoStatesAvailableException("Attempted to reserve $stateRefs for $id but only $rs rows available")
             }
             catch (e: SQLException) {
                 log.error("""soft lock update error attempting to reserve states: $stateRefs for $id
@@ -302,12 +302,9 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
-    fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
+    private fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
 
-        val issuerKeysStr =
-            onlyFromIssuerParties?.let {
-                it.fold("") { issuerKeysStr, it -> issuerKeysStr + "('${it.owningKey.toBase58String()}')," }.dropLast(1)
-            }
+        val issuerKeysStr = onlyFromIssuerParties?.fold("") { left, right -> left + "('${right.owningKey.toBase58String()}')," }?.dropLast(1)
 
         // TODO: Need to provide a database provider independent means of performing this function.
         //       We are using an H2 specific means of selecting a minimum set of rows that match a request amount of coins:
@@ -384,21 +381,21 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
 
     override fun <T : ContractState> softLockedStates(lockId: UUID?): List<StateAndRef<T>> {
         val stateAndRefs =
-                session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
-                    var query = select(VaultSchema.VaultStates::class)
-                            .where(VaultSchema.VaultStates::stateStatus eq Vault.StateStatus.UNCONSUMED)
-                            .and(VaultSchema.VaultStates::contractStateClassName eq Cash.State::class.java.name)
-                    if (lockId != null)
-                        query.and(VaultSchema.VaultStates::lockId eq lockId)
-                    else
-                        query.and(VaultSchema.VaultStates::lockId.notNull())
-                    query.get()
-                            .map { it ->
-                                val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
-                                val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
-                                StateAndRef(state, stateRef)
-                            }.toList()
-                }
+            session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
+                var query = select(VaultSchema.VaultStates::class)
+                        .where(VaultSchema.VaultStates::stateStatus eq Vault.StateStatus.UNCONSUMED)
+                        .and(VaultSchema.VaultStates::contractStateClassName eq Cash.State::class.java.name)
+                if (lockId != null)
+                    query.and(VaultSchema.VaultStates::lockId eq lockId)
+                else
+                    query.and(VaultSchema.VaultStates::lockId.notNull())
+                query.get()
+                        .map { it ->
+                            val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
+                            val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
+                            StateAndRef(state, stateRef)
+                        }.toList()
+            }
         return stateAndRefs
     }
 
@@ -433,19 +430,17 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         //
         // Finally, we add the states to the provided partial transaction.
 
-        // retrieve unspent and unlocked cash states that meet out spending criteria
+        // Retrieve unspent and unlocked cash states that meet our spending criteria.
         val acceptableCoins = unconsumedStatesForSpending<Cash.State>(amount, onlyFromParties, tx.notary, tx.lockId)
 
         // TODO: We should be prepared to produce multiple transactions spending inputs from
         // different notaries, or at least group states by notary and take the set with the
-        // highest total value
+        // highest total value.
 
         // notary may be associated with locked state only
         tx.notary = acceptableCoins.firstOrNull()?.state?.notary
 
-        val gatheredCoins = gatherCoins(acceptableCoins, amount)
-        val gathered = gatheredCoins.first
-        val gatheredAmount = gatheredCoins.second
+        val (gathered, gatheredAmount) = gatherCoins(acceptableCoins, amount)
         softLockReserve(tx.lockId, gathered.map { it.ref }.toSet())
 
         val takeChangeFrom = gathered.firstOrNull()
@@ -518,7 +513,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             throw InsufficientBalanceException(amount - gatheredAmount)
         }
 
-        log.trace("Gathered coins: requested $amount, available $gatheredAmount, change: ${gatheredAmount - amount}}")
+        log.trace("Gathered coins: requested $amount, available $gatheredAmount, change: ${gatheredAmount - amount}")
 
         return Pair(gathered, gatheredAmount)
     }
@@ -594,8 +589,4 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     private fun stateRefsToCompositeKeyStr(stateRefs: List<StateRef>): String {
         return stateRefs.fold("") { stateRefsAsStr, it -> stateRefsAsStr + "('${it.txhash}','${it.index}')," }.dropLast(1)
     }
-}
-
-class SoftLockingException(override val message: String?, override val cause: Throwable? = null) : FlowException(message, cause) {
-    override fun toString() = "Soft locking error: $message"
 }

@@ -14,8 +14,8 @@ import net.corda.core.crypto.AbstractParty
 import net.corda.core.crypto.CompositeKey
 import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
-import net.corda.core.flows.FlowException
 import net.corda.core.node.ServiceHub
+import net.corda.core.node.services.NoStatesAvailableException
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.VaultService
 import net.corda.core.node.services.unconsumedStates
@@ -302,7 +302,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
-    private fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
+    internal fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
 
         val issuerKeysStr = onlyFromIssuerParties?.fold("") { left, right -> left + "('${right.owningKey.toBase58String()}')," }?.dropLast(1)
 

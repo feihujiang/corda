@@ -10,7 +10,6 @@ import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.transactions.WireTransaction
 import rx.Observable
 import java.io.InputStream
-import java.lang.Iterable
 import java.security.KeyPair
 import java.security.PrivateKey
 import java.security.PublicKey

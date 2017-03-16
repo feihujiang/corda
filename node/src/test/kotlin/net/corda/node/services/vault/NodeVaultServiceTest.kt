@@ -1,4 +1,4 @@
-package net.corda.node.services
+package net.corda.node.services.vault
 
 import net.corda.contracts.asset.Cash
 import net.corda.contracts.testing.fillWithSomeTestCash
@@ -13,7 +13,6 @@ import net.corda.core.utilities.DUMMY_NOTARY
 import net.corda.core.utilities.LogHelper
 import net.corda.node.services.schema.HibernateObserver
 import net.corda.node.services.schema.NodeSchemaService
-import net.corda.node.services.vault.NodeVaultService
 import net.corda.node.utilities.configureDatabase
 import net.corda.node.utilities.databaseTransaction
 import net.corda.testing.MEGA_CORP
@@ -39,7 +38,6 @@ class NodeVaultServiceTest {
     lateinit var dataSource: Closeable
     lateinit var database: Database
     lateinit var persister: HibernateObserver
-    private val dataSourceProps = makeTestDataSourceProperties()
 
     @Before
     fun setUp() {

@@ -35,9 +35,12 @@ import net.corda.node.utilities.bufferUntilDatabaseCommit
 import net.corda.node.utilities.wrapWithDatabaseTransaction
 import rx.Observable
 import rx.subjects.PublishSubject
+import java.lang.Thread.sleep
 import java.security.PublicKey
 import java.sql.SQLException
 import java.util.*
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Currently, the node vault service is a very simple RDBMS backed implementation.  It will change significantly when
@@ -236,12 +239,14 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
+    @Throws(NoStatesAvailableException::class)
     override fun softLockReserve(id: UUID, stateRefs: Set<StateRef>) {
         if (stateRefs.isNotEmpty()) {
             val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
+            val softLockTimestamp = services.clock.instant()
             // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
             val updateStatement = """
-                UPDATE VAULT_STATES SET lock_id = '$id', lock_timestamp = '${services.clock.instant()}'
+                UPDATE VAULT_STATES SET lock_id = '$id', lock_timestamp = '$softLockTimestamp'
                 WHERE ((transaction_id, output_index) IN ($stateRefsAsStr))
                 AND (state_status = 0)
                 AND ((lock_id is null) OR (lock_id = '$id'));
@@ -253,12 +258,26 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 if (rs > 0 && rs == stateRefs.size) {
                     log.trace("Reserving soft lock states for $id: $stateRefs")
                 }
-                else throw NoStatesAvailableException("Attempted to reserve $stateRefs for $id but only $rs rows available")
+                else {
+                    // revert partial soft locks
+                    val revertUpdateStatement = """
+                        UPDATE VAULT_STATES SET lock_id = null
+                        WHERE ((transaction_id, output_index) IN ($stateRefsAsStr))
+                        AND (lock_timestamp = '$softLockTimestamp') AND (lock_id = '$id');
+                    """
+                    log.debug(revertUpdateStatement)
+                    val rsr = statement.executeUpdate(revertUpdateStatement)
+                    if (rsr > 0) {
+                        log.trace("Reverting $rsr partially soft locked states for $id")
+                    }
+                    throw NoStatesAvailableException("Attempted to reserve $stateRefs for $id but only $rs rows available")
+                }
             }
             catch (e: SQLException) {
                 log.error("""soft lock update error attempting to reserve states: $stateRefs for $id
                             $e.
                         """)
+                throw NoStatesAvailableException("Failed to reserve $stateRefs for $id")
             }
             finally { statement.close() }
         }
@@ -302,9 +321,15 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
-    internal fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID? = null): List<StateAndRef<T>> {
+    // coin selection retry loop counter, sleep (msecs) and lock for selecting states
+    val MAX_RETRIES = 5
+    val RETRY_SLEEP = 100
+    val spendLock: ReentrantLock = ReentrantLock()
+
+    internal fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID): List<StateAndRef<T>> {
 
         val issuerKeysStr = onlyFromIssuerParties?.fold("") { left, right -> left + "('${right.owningKey.toBase58String()}')," }?.dropLast(1)
+        var stateAndRefs = mutableListOf<StateAndRef<T>>()
 
         // TODO: Need to provide a database provider independent means of performing this function.
         //       We are using an H2 specific means of selecting a minimum set of rows that match a request amount of coins:
@@ -313,70 +338,74 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         //       2) H2 uses session variables to perform this accumulator function:
         //          http://www.h2database.com/html/functions.html#set
         //       3) H2 does not support JOIN's in FOR UPDATE (hence we are forced to execute 2 queries)
-        mutex.locked {
-            val statement = configuration.jdbcSession().createStatement()
-            try {
-                statement.execute("CALL SET(@t, 0);")
 
-                val selectJoin = """
-                SELECT vs.transaction_id, vs.output_index, SET(@t, ifnull(@t,0)+ccs.pennies) total_pennies
-                FROM vault_states AS vs, contract_cash_states AS ccs
-                WHERE vs.transaction_id = ccs.transaction_id AND vs.output_index = ccs.output_index
-                AND vs.state_status = 0
-                AND ccs.ccy_code = '${amount.token}' and @t <= ${amount.quantity}
-            """ +
-                        (if (notary != null)
-                            " AND vs.notary_key = '${notary.owningKey.toBase58String()}'" else "") +
-                        (if (issuerKeysStr != null)
-                            " AND ccs.issuer_key IN $issuerKeysStr" else "") +
-                        (if (lockId != null)
-                            " AND (vs.lock_id is null OR vs.lock_id = '$lockId')"
-                        else " AND vs.lock_id is null")
+        for (retryCount in 1..MAX_RETRIES) {
 
-                // Retrieve spendable state refs
-                var stateRefs = mutableListOf<StateRef>()
-                val rs1 = statement.executeQuery(selectJoin)
-                log.debug(selectJoin)
-                while (rs1.next()) {
-                    val txHash = SecureHash.parse(rs1.getString(1))
-                    val index = rs1.getInt(2)
-                    stateRefs.add(StateRef(txHash, index))
-                }
+            spendLock.withLock {
+                val statement = configuration.jdbcSession().createStatement()
+                try {
+                    statement.execute("CALL SET(@t, 0);")
 
-                if (stateRefs.isNotEmpty()) {
-                    val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs)
-                    // TODO: upgrade to Requery 1.2.0 and rewrite with Requery DSL (https://github.com/requery/requery/issues/434)
-                    val selectForUpdateStatement = """
-                    SELECT transaction_id, output_index, contract_state, notary_name, notary_key
-                    FROM vault_states
-                    WHERE (transaction_id, output_index) IN ($stateRefsAsStr)
-                    FOR UPDATE
-                """
-                    // Retrieve locked states
-                    var lockStates = mutableListOf<StateAndRef<T>>()
-                    val rs = statement.executeQuery(selectForUpdateStatement)
-                    log.debug(selectForUpdateStatement)
+                    // we select spendable states irrespective of lock but prioritised by unlocked ones (Eg. null)
+                    // the softLockReserve update will detect whether we try to lock states locked by others
+                    val selectJoin = """
+                        SELECT vs.transaction_id, vs.output_index, vs.contract_state, SET(@t, ifnull(@t,0)+ccs.pennies) total_pennies
+                        FROM vault_states AS vs, contract_cash_states AS ccs
+                        WHERE vs.transaction_id = ccs.transaction_id AND vs.output_index = ccs.output_index
+                        AND vs.state_status = 0
+                        AND ccs.ccy_code = '${amount.token}' and @t <= ${amount.quantity}
+                        """ +
+                            (if (notary != null)
+                                " AND vs.notary_key = '${notary.owningKey.toBase58String()}'" else "") +
+                            (if (issuerKeysStr != null)
+                                " AND ccs.issuer_key IN $issuerKeysStr" else "") +
+                            " ORDER BY vs.lock_id NULLS FIRST"
+
+                    // Retrieve spendable state refs
+                    val rs = statement.executeQuery(selectJoin)
+                    stateAndRefs.clear()
+                    log.debug(selectJoin)
+                    var pennies = 0L
                     while (rs.next()) {
                         val txHash = SecureHash.parse(rs.getString(1))
                         val index = rs.getInt(2)
                         val stateRef = StateRef(txHash, index)
                         val state = rs.getBytes(3).deserialize<TransactionState<T>>(threadLocalStorageKryo())
-                        lockStates.add(StateAndRef(state, stateRef))
+                        pennies = rs.getLong(4)
+                        stateAndRefs.add(StateAndRef(state, stateRef))
                     }
-                    log.trace("Locked ${lockStates.count()} rows FOR UPDATE with states: ${lockStates}")
 
-                    return lockStates
-                }
-            } catch (e: SQLException) {
-                log.error("""Failed retrieving unconsumed states for: amount [$amount], onlyFromIssuerParties [$onlyFromIssuerParties], notary [$notary], lockId [$lockId]
+                    if (stateAndRefs.isNotEmpty() && pennies >= amount.quantity) {
+                        // we should a minimum number of states to satisfy our selection `amount` criteria
+                        log.trace("Coin selection for $amount retrieved ${stateAndRefs.count()} states totalling $pennies pennies: $stateAndRefs")
+
+                        // update database
+                        softLockReserve(lockId, stateAndRefs.map { it.ref }.toSet())
+                        return stateAndRefs
+                    }
+                    log.trace("Coin selection requested $amount but retrieved $pennies pennies")
+                    return stateAndRefs
+
+                } catch (e: SQLException) {
+                    log.error("""Failed retrieving unconsumed states for: amount [$amount], onlyFromIssuerParties [$onlyFromIssuerParties], notary [$notary], lockId [$lockId]
                             $e.
                         """)
+                } catch (e: NoStatesAvailableException) {
+                    log.warn(e.message)
+                    // retry only if there are locked states that may become available again (or consumed with change)
+                } finally {
+                    statement.close()
+                }
             }
-            finally { statement.close() }
+
+            log.warn("Coin selection failed on attempt $retryCount")
+            if (retryCount != MAX_RETRIES) {
+                sleep(RETRY_SLEEP * retryCount.toLong())
+            }
         }
 
-        log.warn("No spendable states identified for $amount")
-        return emptyList()
+        log.warn("Insufficient spendable states identified for $amount")
+        return stateAndRefs
     }
 
     override fun <T : ContractState> softLockedStates(lockId: UUID?): List<StateAndRef<T>> {
@@ -441,7 +470,6 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         tx.notary = acceptableCoins.firstOrNull()?.state?.notary
 
         val (gathered, gatheredAmount) = gatherCoins(acceptableCoins, amount)
-        softLockReserve(tx.lockId, gathered.map { it.ref }.toSet())
 
         val takeChangeFrom = gathered.firstOrNull()
         val change = if (takeChangeFrom != null && gatheredAmount > amount) {

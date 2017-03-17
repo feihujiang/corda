@@ -7,7 +7,6 @@ import net.corda.contracts.testing.fillWithSomeTestDeals
 import net.corda.contracts.testing.fillWithSomeTestLinearStates
 import net.corda.core.contracts.*
 import net.corda.core.crypto.composite
-import net.corda.core.node.recordTransactions
 import net.corda.core.node.services.VaultService
 import net.corda.core.node.services.consumedStates
 import net.corda.core.node.services.unconsumedStates
@@ -140,16 +139,13 @@ class VaultWithCashTest {
 
         databaseTransaction(database) {
             // A tx that sends us money.
-            val usefulTX = TransactionType.General.Builder(null).apply {
-                Cash().generateIssue(this, 100.DOLLARS `issued by` MEGA_CORP.ref(1), freshKey.public.composite, DUMMY_NOTARY)
-                signWith(MEGA_CORP_KEY)
-            }.toSignedTransaction()
-
-            assertNull(vault.cashBalances[USD])
-            services.recordTransactions(usefulTX)
+            services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 10, 10, Random(0L),
+                                            issuedBy = MEGA_CORP.ref(1),
+                                            issuerKey = MEGA_CORP_KEY,
+                                            ownedBy = freshKey.public.composite)
             println("Cash balance: ${vault.cashBalances[USD]}")
 
-            assertThat(vault.unconsumedStates<Cash.State>()).hasSize(1)
+            assertThat(vault.unconsumedStates<Cash.State>()).hasSize(10)
             assertThat(vault.softLockedStates<Cash.State>()).hasSize(0)
         }
 

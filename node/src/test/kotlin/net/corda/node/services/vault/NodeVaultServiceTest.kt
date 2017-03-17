@@ -292,6 +292,56 @@ class NodeVaultServiceTest {
     }
 
     @Test
+    fun `unconsumedStatesForSpending exact amount`() {
+        databaseTransaction(database) {
+
+            services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 1, 1, Random(0L))
+
+            val unconsumedStates = services.vaultService.unconsumedStates<Cash.State>().toList()
+            assertThat(unconsumedStates).hasSize(1)
+
+            val spendableStatesUSD = (services.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(100.DOLLARS, lockId = UUID.randomUUID())
+            spendableStatesUSD.forEach(::println)
+            assertThat(spendableStatesUSD).hasSize(1)
+            assertThat(spendableStatesUSD[0].state.data.amount.quantity).isEqualTo(100L*100)
+            assertThat(services.vaultService.softLockedStates<Cash.State>()).hasSize(1)
+        }
+    }
+
+    @Test
+    fun `unconsumedStatesForSpending insufficient amount`() {
+        databaseTransaction(database) {
+
+            services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 1, 1, Random(0L))
+
+            val unconsumedStates = services.vaultService.unconsumedStates<Cash.State>().toList()
+            assertThat(unconsumedStates).hasSize(1)
+
+            val spendableStatesUSD = (services.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(110.DOLLARS, lockId = UUID.randomUUID())
+            spendableStatesUSD.forEach(::println)
+            assertThat(spendableStatesUSD).hasSize(1)
+            assertThat(services.vaultService.softLockedStates<Cash.State>()).hasSize(0)
+        }
+    }
+
+    @Test
+    fun `unconsumedStatesForSpending small amount`() {
+        databaseTransaction(database) {
+
+            services.fillWithSomeTestCash(100.DOLLARS, DUMMY_NOTARY, 2, 2, Random(0L))
+
+            val unconsumedStates = services.vaultService.unconsumedStates<Cash.State>().toList()
+            assertThat(unconsumedStates).hasSize(2)
+
+            val spendableStatesUSD = (services.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(1.DOLLARS, lockId = UUID.randomUUID())
+            spendableStatesUSD.forEach(::println)
+            assertThat(spendableStatesUSD).hasSize(1)
+            assertThat(spendableStatesUSD[0].state.data.amount.quantity).isGreaterThanOrEqualTo(1L*100)
+            assertThat(services.vaultService.softLockedStates<Cash.State>()).hasSize(1)
+        }
+    }
+
+    @Test
     fun `states soft locking query granularity`() {
         databaseTransaction(database) {
 
@@ -303,11 +353,11 @@ class NodeVaultServiceTest {
             assertThat(allStates).hasSize(30)
 
             for (i in 1..5) {
-                val spendableStatesUSD = (services.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(20.DOLLARS)
+                val spendableStatesUSD = (services.vaultService as NodeVaultService).unconsumedStatesForSpending<Cash.State>(20.DOLLARS, lockId = UUID.randomUUID())
                 spendableStatesUSD.forEach(::println)
-                services.vaultService.softLockReserve(UUID.randomUUID(), spendableStatesUSD.map { it.ref }.toSet())
             }
-            assertThat(services.vaultService.softLockedStates<Cash.State>()).hasSize(10)
+            // note only 3 spend attempts succeed with a total of 8 states
+            assertThat(services.vaultService.softLockedStates<Cash.State>()).hasSize(8)
         }
     }
 

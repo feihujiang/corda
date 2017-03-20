@@ -80,9 +80,10 @@ class IssuerFlowTest {
             val issueToPartyAndRef = bankClientNode.info.legalIdentity.ref(OpaqueBytes.Companion.of(123))
 
             // this test exercises the Cashflow issue and move subflows to ensure consistent spending of issued states
+            val amount = 10000.DOLLARS
             val amounts = calculateRandomlySizedAmounts(10000.DOLLARS, 10, 10, Random())
-            val handles = amounts.map { amount ->
-                runIssuerAndIssueRequester(bankOfCordaNode, bankClientNode, amount.toInt().DOLLARS, issueToPartyAndRef)
+            val handles = amounts.map { pennies ->
+                runIssuerAndIssueRequester(bankOfCordaNode, bankClientNode, Amount(pennies, amount.token), issueToPartyAndRef)
             }
             handles.forEach {
                 require (it.issueRequestResult.get() is SignedTransaction)

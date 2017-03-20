@@ -136,7 +136,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         amount += producedAmount.quantity - consumedAmount.quantity
                     }
                     upsert(state ?: cashBalanceEntity)
-                    log.trace("Updating Cash balance for $currency by ${cashBalanceEntity.amount}")
+                    log.trace("Updating Cash balance for $currency by ${cashBalanceEntity.amount} pennies")
                 }
             }
         }

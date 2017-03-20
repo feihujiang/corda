@@ -358,14 +358,12 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         WHERE vs.transaction_id = ccs.transaction_id AND vs.output_index = ccs.output_index
                         AND vs.state_status = 0
                         AND ccs.ccy_code = '${amount.token}' and @t <= ${amount.quantity}
+                        AND (vs.lock_id is null OR vs.lock_id = '$lockId')
                         """ +
                             (if (notary != null)
                                 " AND vs.notary_key = '${notary.owningKey.toBase58String()}'" else "") +
                             (if (issuerKeysStr != null)
                                 " AND ccs.issuer_key IN $issuerKeysStr" else "") +
-                            (if (lockId != null)
-                                " AND (vs.lock_id is null OR vs.lock_id = '$lockId')"
-                            else " AND vs.lock_id is null") +
                             " ORDER BY vs.lock_id NULLS FIRST"
 
                     // Retrieve spendable state refs

@@ -281,7 +281,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 log.error("""soft lock update error attempting to reserve states: $stateRefs for $id
                             $e.
                         """)
-                throw NoStatesAvailableException("Failed to reserve $stateRefs for $id")
+                throw NoStatesAvailableException("Failed to reserve $stateRefs for $id", e)
             }
             finally { statement.close() }
         }
@@ -403,6 +403,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             }
 
             log.warn("Coin selection failed on attempt $retryCount")
+            // TODO: revisit the back off strategy for contended spending.
             if (retryCount != MAX_RETRIES) {
                 sleep(RETRY_SLEEP * retryCount.toLong())
             }

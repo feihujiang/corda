@@ -253,7 +253,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 UPDATE VAULT_STATES SET lock_id = '$id', lock_timestamp = '$softLockTimestamp'
                 WHERE ((transaction_id, output_index) IN ($stateRefsAsStr))
                 AND (state_status = 0)
-                AND ((lock_id is null) OR (lock_id = '$id'));
+                AND ((lock_id = '$id') OR (lock_id is null));
             """
             val statement = configuration.jdbcSession().createStatement()
             log.debug(updateStatement)
@@ -363,6 +363,9 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                                 " AND vs.notary_key = '${notary.owningKey.toBase58String()}'" else "") +
                             (if (issuerKeysStr != null)
                                 " AND ccs.issuer_key IN $issuerKeysStr" else "") +
+                            (if (lockId != null)
+                                " AND (vs.lock_id is null OR vs.lock_id = '$lockId')"
+                            else " AND vs.lock_id is null") +
                             " ORDER BY vs.lock_id NULLS FIRST"
 
                     // Retrieve spendable state refs

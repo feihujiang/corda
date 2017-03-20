@@ -22,7 +22,7 @@ import net.corda.core.node.services.unconsumedStates
 import net.corda.core.serialization.SingletonSerializeAsToken
 import net.corda.core.serialization.deserialize
 import net.corda.core.serialization.serialize
-import net.corda.core.serialization.threadLocalStorageKryo
+import net.corda.core.serialization.storageKryo
 import net.corda.core.tee
 import net.corda.core.transactions.TransactionBuilder
 import net.corda.core.transactions.WireTransaction
@@ -86,7 +86,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         index = it.key.index
                         stateStatus = Vault.StateStatus.UNCONSUMED
                         contractStateClassName = it.value.state.data.javaClass.name
-                        contractState = it.value.state.serialize(threadLocalStorageKryo()).bytes
+                        contractState = it.value.state.serialize(storageKryo()).bytes
                         notaryName = it.value.state.notary.name
                         notaryKey = it.value.state.notary.owningKey.toBase58String()
                         recordedTime = services.clock.instant()
@@ -185,7 +185,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 Sequence{iterator}
                         .map { it ->
                             val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
-                            val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
+                            val state = it.contractState.deserialize<TransactionState<T>>(storageKryo())
                             StateAndRef(state, stateRef)
                         }
             }
@@ -374,7 +374,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         val txHash = SecureHash.parse(rs.getString(1))
                         val index = rs.getInt(2)
                         val stateRef = StateRef(txHash, index)
-                        val state = rs.getBytes(3).deserialize<TransactionState<T>>(threadLocalStorageKryo())
+                        val state = rs.getBytes(3).deserialize<TransactionState<T>>(storageKryo())
                         pennies = rs.getLong(4)
                         stateAndRefs.add(StateAndRef(state, stateRef))
                     }
@@ -426,7 +426,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 query.get()
                         .map { it ->
                             val stateRef = StateRef(SecureHash.parse(it.txId), it.index)
-                            val state = it.contractState.deserialize<TransactionState<T>>(threadLocalStorageKryo())
+                            val state = it.contractState.deserialize<TransactionState<T>>(storageKryo())
                             StateAndRef(state, stateRef)
                         }.toList()
             }
@@ -572,7 +572,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                 while (rs.next()) {
                     val txHash = SecureHash.parse(rs.getString(1))
                     val index = rs.getInt(2)
-                    val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(threadLocalStorageKryo())
+                    val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(storageKryo())
                     consumedStates.add(StateAndRef(state, StateRef(txHash, index)))
                 }
             } catch (e: SQLException) {

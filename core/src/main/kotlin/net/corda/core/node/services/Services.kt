@@ -221,9 +221,9 @@ interface VaultService {
     /**
      * Reserve a set of [StateRef] for a given [UUID] unique identifier.
      * Typically, the unique identifier will refer to a Flow id associated with a [Transaction] in an in-flight flow.
-     * In the case of Coin Selection, soft locks are automatically taken upon gathering relevant unconsumed input refs.
+     * In the case of coin selection, soft locks are automatically taken upon gathering relevant unconsumed input refs.
      *
-     * @throws [NoStatesAvailableException] when not possible to soft lock all of requested [StateRef]
+     * @throws [NoStatesAvailableException] when not possible to softLock all of requested [StateRef]
      */
     @Throws(NoStatesAvailableException::class)
     fun softLockReserve(id: UUID, stateRefs: Set<StateRef>)

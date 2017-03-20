@@ -12,8 +12,6 @@ import net.corda.core.utilities.DUMMY_NOTARY
 import net.corda.core.utilities.DUMMY_PUBKEY_1
 import net.corda.core.utilities.DUMMY_PUBKEY_2
 import net.corda.core.utilities.LogHelper
-import net.corda.node.services.schema.HibernateObserver
-import net.corda.node.services.schema.NodeSchemaService
 import net.corda.node.services.vault.NodeVaultService
 import net.corda.node.utilities.configureDatabase
 import net.corda.node.utilities.databaseTransaction
@@ -49,7 +47,6 @@ class CashTests {
     lateinit var dataSource: Closeable
     lateinit var database: Database
     lateinit var vaultStatesUnconsumed: List<StateAndRef<Cash.State>>
-    lateinit var persister: HibernateObserver
 
     @Before
     fun setUp() {
@@ -61,7 +58,7 @@ class CashTests {
         databaseTransaction(database) {
             services = object : MockServices() {
                 override val keyManagementService: MockKeyManagementService = MockKeyManagementService(MINI_CORP_KEY, MEGA_CORP_KEY, OUR_KEY)
-                override val vaultService: VaultService = NodeVaultService(this, dataSourceProps)
+                override val vaultService: VaultService = makeVaultService(dataSourceProps)
 
                 override fun recordTransactions(txs: Iterable<SignedTransaction>) {
                     for (stx in txs) {
@@ -71,7 +68,6 @@ class CashTests {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
-            persister = HibernateObserver(services.vaultService, NodeSchemaService())
 
             services.fillWithSomeTestCash(howMuch = 100.DOLLARS, atLeastThisManyStates = 1, atMostThisManyStates = 1,
                     issuedBy = MEGA_CORP.ref(1), issuerKey = MEGA_CORP_KEY, ownedBy = OUR_PUBKEY_1)

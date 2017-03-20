@@ -93,6 +93,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                     }
                     insert(state)
                 }
+                // TODO: awaiting support of UPDATE WHERE <Composite key> IN in Requery DSL
                 consumedStateRefs.forEach { stateRef ->
                     val queryKey = io.requery.proxy.CompositeKey(mapOf(VaultStatesEntity.TX_ID to stateRef.txhash.toString(),
                             VaultStatesEntity.INDEX to stateRef.index))
@@ -115,6 +116,8 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     }
 
     // TODO: consider moving this logic outside the vault
+    // TODO: revisit the concurrency safety of this logic when we move beyond single threaded SMM.
+    //       For example, we update currency totals in a non-deterministic order and so expose ourselves to deadlock.
     private fun maybeUpdateCashBalances(update: Vault.Update) {
         if (update.containsType<Cash.State>()) {
             val consumed = sumCashStates(update.consumed)
@@ -217,6 +220,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             recordUpdate(netDelta)
             maybeUpdateCashBalances(netDelta)
             mutex.locked {
+                // flowId required by SoftLockManager to perform auto-registration of soft locks for new states
                 val uuid = (Strand.currentStrand() as? FlowStateMachineImpl<*>)?.id?.uuid
                 val vaultUpdate = if (uuid != null) netDelta.copy(flowId = uuid) else netDelta
                 updatesPublisher.onNext(vaultUpdate)

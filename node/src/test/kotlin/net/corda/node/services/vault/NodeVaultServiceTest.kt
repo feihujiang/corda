@@ -37,7 +37,6 @@ class NodeVaultServiceTest {
     val vault: VaultService get() = services.vaultService
     lateinit var dataSource: Closeable
     lateinit var database: Database
-    lateinit var persister: HibernateObserver
 
     @Before
     fun setUp() {
@@ -48,7 +47,7 @@ class NodeVaultServiceTest {
         database = dataSourceAndDatabase.second
         databaseTransaction(database) {
             services = object : MockServices() {
-                override val vaultService: VaultService = NodeVaultService(this, dataSourceProps)
+                override val vaultService: VaultService = makeVaultService(dataSourceProps)
 
                 override fun recordTransactions(txs: Iterable<SignedTransaction>) {
                     for (stx in txs) {
@@ -58,7 +57,6 @@ class NodeVaultServiceTest {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
-            persister = HibernateObserver(services.vaultService, NodeSchemaService())
         }
     }
 

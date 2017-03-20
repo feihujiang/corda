@@ -230,7 +230,7 @@ class CommercialPaperTestsGeneric {
         databaseTransaction(databaseAlice) {
 
             aliceServices = object : MockServices() {
-                override val vaultService: VaultService = NodeVaultService(this, dataSourcePropsAlice)
+                override val vaultService: VaultService = makeVaultService(dataSourcePropsAlice)
 
                 override fun recordTransactions(txs: Iterable<SignedTransaction>) {
                     for (stx in txs) {
@@ -240,8 +240,6 @@ class CommercialPaperTestsGeneric {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
-            HibernateObserver(aliceServices.vaultService, NodeSchemaService())
-
             alicesVault = aliceServices.fillWithSomeTestCash(9000.DOLLARS, atLeastThisManyStates = 1, atMostThisManyStates = 1)
             aliceVaultService = aliceServices.vaultService
         }
@@ -252,7 +250,7 @@ class CommercialPaperTestsGeneric {
         databaseTransaction(databaseBigCorp) {
 
             bigCorpServices = object : MockServices() {
-                override val vaultService: VaultService = NodeVaultService(this, dataSourcePropsBigCorp)
+                override val vaultService: VaultService = makeVaultService(dataSourcePropsBigCorp)
 
                 override fun recordTransactions(txs: Iterable<SignedTransaction>) {
                     for (stx in txs) {
@@ -262,8 +260,6 @@ class CommercialPaperTestsGeneric {
                     vaultService.notifyAll(txs.map { it.tx })
                 }
             }
-            HibernateObserver(bigCorpServices.vaultService, NodeSchemaService())
-
             bigCorpVault = bigCorpServices.fillWithSomeTestCash(13000.DOLLARS, atLeastThisManyStates = 1, atMostThisManyStates = 1)
             bigCorpVaultService = bigCorpServices.vaultService
         }
@@ -305,19 +301,19 @@ class CommercialPaperTestsGeneric {
         }
 
         databaseTransaction(databaseBigCorp) {
-            val tooEarlyRedemptionLockId = UUID.randomUUID()
-            fun makeRedeemTX(time: Instant): SignedTransaction {
+            fun makeRedeemTX(time: Instant): Pair<SignedTransaction, UUID> {
                 val ptx = TransactionType.General.Builder(DUMMY_NOTARY)
                 ptx.setTime(time, 30.seconds)
-                ptx.lockId = tooEarlyRedemptionLockId
                 CommercialPaper().generateRedeem(ptx, moveTX.tx.outRef(1), bigCorpVaultService)
                 ptx.signWith(aliceServices.key)
                 ptx.signWith(bigCorpServices.key)
                 ptx.signWith(DUMMY_NOTARY_KEY)
-                return ptx.toSignedTransaction()
+                return Pair(ptx.toSignedTransaction(), ptx.lockId)
             }
 
-            val tooEarlyRedemption = makeRedeemTX(TEST_TX_TIME + 10.days)
+            val redeemTX = makeRedeemTX(TEST_TX_TIME + 10.days)
+            val tooEarlyRedemption = redeemTX.first
+            val tooEarlyRedemptionLockId = redeemTX.second
             val e = assertFailsWith(TransactionVerificationException::class) {
                 tooEarlyRedemption.toLedgerTransaction(aliceServices).verify()
             }
@@ -325,7 +321,7 @@ class CommercialPaperTestsGeneric {
             aliceServices.vaultService.softLockRelease(tooEarlyRedemptionLockId)
             assertTrue(e.cause!!.message!!.contains("paper must have matured"))
 
-            val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days)
+            val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days).first
             validRedemption.toLedgerTransaction(aliceServices).verify()
             // soft lock not released after success either!!! (as transaction not recorded)
         }

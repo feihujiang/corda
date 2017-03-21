@@ -357,7 +357,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         FROM vault_states AS vs, contract_cash_states AS ccs
                         WHERE vs.transaction_id = ccs.transaction_id AND vs.output_index = ccs.output_index
                         AND vs.state_status = 0
-                        AND ccs.ccy_code = '${amount.token}' and @t <= ${amount.quantity}
+                        AND ccs.ccy_code = '${amount.token}' and @t < ${amount.quantity}
                         AND (vs.lock_id is null OR vs.lock_id = '$lockId')
                         """ +
                             (if (notary != null)

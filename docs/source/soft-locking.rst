@@ -1,10 +1,10 @@
 Soft Locking
 ============
 
-Soft Locking is implemented in the vault to prevent multiple transactions trying to use the same output(s) simultaneously.
-Violation of a soft lock would result in a double spend being created by a participant node, which would subsequently be rejected by the notary.
+Soft Locking is implemented in the vault to try and prevent a node constructing transactions that attempt to use the same input(s) simultaneously.
+Such transactions would result in naturally wasted work when the notary rejects them as double spend attempts.
 
-Soft locks are automatically applied to coin selection (eg. cash spending) to ensure that no two transactions attempt to 
+Soft locks are automatically applied to coin selection (eg. cash spending) to ensure that no two transactions attempt to
 spend the same fungible states. The outcome of such an eventuality will result in an ``InsufficientBalanceException`` for one
 of the requesters if there are insufficient number of fungible states available to satisfy both requests.
 

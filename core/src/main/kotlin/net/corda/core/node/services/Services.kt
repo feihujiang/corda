@@ -1,5 +1,6 @@
 package net.corda.core.node.services
 
+import co.paralleluniverse.fibers.Suspendable
 import com.google.common.util.concurrent.ListenableFuture
 import net.corda.core.contracts.*
 import net.corda.core.crypto.*
@@ -198,6 +199,7 @@ interface VaultService {
      *         there is insufficient quantity for a given currency (and optionally set of Issuer Parties).
      */
     @Throws(InsufficientBalanceException::class)
+    @Suspendable
     fun generateSpend(tx: TransactionBuilder,
                       amount: Amount<Currency>,
                       to: CompositeKey,
@@ -223,9 +225,9 @@ interface VaultService {
      * Typically, the unique identifier will refer to a Flow id associated with a [Transaction] in an in-flight flow.
      * In the case of coin selection, soft locks are automatically taken upon gathering relevant unconsumed input refs.
      *
-     * @throws [NoStatesAvailableException] when not possible to softLock all of requested [StateRef]
+     * @throws [StatesNotAvailableException] when not possible to softLock all of requested [StateRef]
      */
-    @Throws(NoStatesAvailableException::class)
+    @Throws(StatesNotAvailableException::class)
     fun softLockReserve(id: UUID, stateRefs: Set<StateRef>)
 
     /**
@@ -261,7 +263,7 @@ inline fun <reified T : DealState> VaultService.dealsWith(party: AbstractParty) 
     it.state.data.parties.any { it == party }
 }
 
-class NoStatesAvailableException(override val message: String?, override val cause: Throwable? = null) : FlowException(message, cause) {
+class StatesNotAvailableException(override val message: String?, override val cause: Throwable? = null) : FlowException(message, cause) {
     override fun toString() = "Soft locking error: $message"
 }
 

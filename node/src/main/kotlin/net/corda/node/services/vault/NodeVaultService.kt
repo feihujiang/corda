@@ -1,5 +1,6 @@
 package net.corda.node.services.vault
 
+import co.paralleluniverse.fibers.Suspendable
 import co.paralleluniverse.strands.Strand
 import io.requery.TransactionIsolation
 import io.requery.kotlin.`in`
@@ -15,7 +16,7 @@ import net.corda.core.crypto.CompositeKey
 import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
 import net.corda.core.node.ServiceHub
-import net.corda.core.node.services.NoStatesAvailableException
+import net.corda.core.node.services.StatesNotAvailableException
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.VaultService
 import net.corda.core.node.services.unconsumedStates
@@ -31,12 +32,14 @@ import net.corda.core.utilities.trace
 import net.corda.node.services.database.RequeryConfiguration
 import net.corda.node.services.statemachine.FlowStateMachineImpl
 import net.corda.node.services.vault.schemas.*
+import net.corda.node.utilities.StrandLocalTransactionManager
 import net.corda.node.utilities.bufferUntilDatabaseCommit
 import net.corda.node.utilities.wrapWithDatabaseTransaction
+import org.jetbrains.exposed.sql.transactions.TransactionManager
 import rx.Observable
 import rx.subjects.PublishSubject
-import java.lang.Thread.sleep
 import java.security.PublicKey
+import java.sql.Connection
 import java.sql.SQLException
 import java.util.*
 import java.util.concurrent.locks.ReentrantLock
@@ -136,7 +139,8 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         amount += producedAmount.quantity - consumedAmount.quantity
                     }
                     upsert(state ?: cashBalanceEntity)
-                    log.trace("Updating Cash balance for $currency by ${cashBalanceEntity.amount} pennies")
+                    val total = state?.amount ?: cashBalanceEntity.amount
+                    log.trace{"Updating Cash balance for $currency by ${cashBalanceEntity.amount} pennies (total: $total)"}
                 }
             }
         }
@@ -243,7 +247,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
     }
 
-    @Throws(NoStatesAvailableException::class)
+    @Throws(StatesNotAvailableException::class)
     override fun softLockReserve(id: UUID, stateRefs: Set<StateRef>) {
         if (stateRefs.isNotEmpty()) {
             val stateRefsAsStr = stateRefsToCompositeKeyStr(stateRefs.toList())
@@ -274,14 +278,14 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                     if (rsr > 0) {
                         log.trace("Reverting $rsr partially soft locked states for $id")
                     }
-                    throw NoStatesAvailableException("Attempted to reserve $stateRefs for $id but only $rs rows available")
+                    throw StatesNotAvailableException("Attempted to reserve $stateRefs for $id but only $rs rows available")
                 }
             }
             catch (e: SQLException) {
                 log.error("""soft lock update error attempting to reserve states: $stateRefs for $id
                             $e.
                         """)
-                throw NoStatesAvailableException("Failed to reserve $stateRefs for $id", e)
+                throw StatesNotAvailableException("Failed to reserve $stateRefs for $id", e)
             }
             finally { statement.close() }
         }
@@ -330,6 +334,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
     val RETRY_SLEEP = 100
     val spendLock: ReentrantLock = ReentrantLock()
 
+    @Suspendable
     internal fun <T : ContractState> unconsumedStatesForSpending(amount: Amount<Currency>, onlyFromIssuerParties: Set<AbstractParty>? = null, notary: Party? = null, lockId: UUID): List<StateAndRef<T>> {
 
         val issuerKeysStr = onlyFromIssuerParties?.fold("") { left, right -> left + "('${right.owningKey.toBase58String()}')," }?.dropLast(1)
@@ -353,12 +358,11 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                     // we select spendable states irrespective of lock but prioritised by unlocked ones (Eg. null)
                     // the softLockReserve update will detect whether we try to lock states locked by others
                     val selectJoin = """
-                        SELECT vs.transaction_id, vs.output_index, vs.contract_state, SET(@t, ifnull(@t,0)+ccs.pennies) total_pennies
+                        SELECT vs.transaction_id, vs.output_index, vs.contract_state, SET(@t, ifnull(@t,0)+ccs.pennies) total_pennies, vs.lock_id
                         FROM vault_states AS vs, contract_cash_states AS ccs
                         WHERE vs.transaction_id = ccs.transaction_id AND vs.output_index = ccs.output_index
                         AND vs.state_status = 0
                         AND ccs.ccy_code = '${amount.token}' and @t < ${amount.quantity}
-                        AND (vs.lock_id is null OR vs.lock_id = '$lockId')
                         """ +
                             (if (notary != null)
                                 " AND vs.notary_key = '${notary.owningKey.toBase58String()}'" else "") +
@@ -378,6 +382,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                         val state = rs.getBytes(3).deserialize<TransactionState<T>>(storageKryo())
                         pennies = rs.getLong(4)
                         stateAndRefs.add(StateAndRef(state, stateRef))
+                        log.trace { "$lockId : ${rs.getString(5)}" }
                     }
 
                     if (stateAndRefs.isNotEmpty() && pennies >= amount.quantity) {
@@ -395,7 +400,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                     log.error("""Failed retrieving unconsumed states for: amount [$amount], onlyFromIssuerParties [$onlyFromIssuerParties], notary [$notary], lockId [$lockId]
                             $e.
                         """)
-                } catch (e: NoStatesAvailableException) {
+                } catch (e: StatesNotAvailableException) {
                     log.warn(e.message)
                     // retry only if there are locked states that may become available again (or consumed with change)
                 } finally {
@@ -406,12 +411,12 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             log.warn("Coin selection failed on attempt $retryCount")
             // TODO: revisit the back off strategy for contended spending.
             if (retryCount != MAX_RETRIES) {
-                sleep(RETRY_SLEEP * retryCount.toLong())
+                FlowStateMachineImpl.sleep(RETRY_SLEEP * retryCount.toLong())
             }
         }
 
         log.warn("Insufficient spendable states identified for $amount")
-        return stateAndRefs
+        return emptyList()
     }
 
     override fun <T : ContractState> softLockedStates(lockId: UUID?): List<StateAndRef<T>> {
@@ -441,6 +446,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
      *                        of given parties. This can be useful if the party you're trying to pay has expectations
      *                        about which type of asset claims they are willing to accept.
      */
+    @Suspendable
     override fun generateSpend(tx: TransactionBuilder,
                                amount: Amount<Currency>,
                                to: CompositeKey,
@@ -543,7 +549,7 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         }
 
         if (gatheredAmount < amount) {
-            log.trace("Insufficient balance: requested $amount, available $gatheredAmount")
+            log.trace("Insufficient balance: requested $amount, available $gatheredAmount (total balance ${cashBalances[amount.token]})")
             throw InsufficientBalanceException(amount - gatheredAmount)
         }
 

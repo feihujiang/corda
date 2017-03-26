@@ -375,32 +375,36 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
                     stateAndRefs.clear()
                     log.debug(selectJoin)
                     var pennies = 0L
+                    var maxPennies = 0L
                     while (rs.next()) {
                         val txHash = SecureHash.parse(rs.getString(1))
                         val index = rs.getInt(2)
                         val stateRef = StateRef(txHash, index)
                         val state = rs.getBytes(3).deserialize<TransactionState<T>>(storageKryo())
                         pennies = rs.getLong(4)
+                        if (pennies >= maxPennies)
+                            maxPennies = pennies
                         stateAndRefs.add(StateAndRef(state, stateRef))
-                        log.trace { "$lockId : ${rs.getString(5)}" }
+                        // TODO: bug in H2 where query sporadically returns incorrect max accumulator value
+                        log.trace { "${rs.getString(5)} : $stateRef : $pennies (max pennies: $maxPennies)" }
                     }
 
                     if (stateAndRefs.isNotEmpty() && pennies >= amount.quantity) {
-                        // we should a minimum number of states to satisfy our selection `amount` criteria
+                        // we should have a minimum number of states to satisfy our selection `amount` criteria
                         log.trace("Coin selection for $amount retrieved ${stateAndRefs.count()} states totalling $pennies pennies: $stateAndRefs")
 
                         // update database
                         softLockReserve(lockId, stateAndRefs.map { it.ref }.toSet())
                         return stateAndRefs
                     }
-                    log.trace("Coin selection requested $amount but retrieved $pennies pennies")
-                    return stateAndRefs
-
+                    log.trace("Coin selection requested $amount but retrieved $pennies pennies with state refs: ${stateAndRefs.map { it.ref }}")
+                    // retry as more states may become available
                 } catch (e: SQLException) {
                     log.error("""Failed retrieving unconsumed states for: amount [$amount], onlyFromIssuerParties [$onlyFromIssuerParties], notary [$notary], lockId [$lockId]
                             $e.
                         """)
                 } catch (e: StatesNotAvailableException) {
+                    stateAndRefs.clear()
                     log.warn(e.message)
                     // retry only if there are locked states that may become available again (or consumed with change)
                 } finally {
@@ -411,12 +415,22 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
             log.warn("Coin selection failed on attempt $retryCount")
             // TODO: revisit the back off strategy for contended spending.
             if (retryCount != MAX_RETRIES) {
-                FlowStateMachineImpl.sleep(RETRY_SLEEP * retryCount.toLong())
+                if (FlowStateMachineImpl.currentStateMachine() != null) {
+                    val db = StrandLocalTransactionManager.database
+                    TransactionManager.current().commit()
+                    TransactionManager.current().close()
+                    Strand.sleep(RETRY_SLEEP * retryCount.toLong())
+                    StrandLocalTransactionManager.database = db
+                    TransactionManager.manager.newTransaction(Connection.TRANSACTION_REPEATABLE_READ)
+                }
+                else Strand.sleep(RETRY_SLEEP * retryCount.toLong())
+
+//                FlowStateMachineImpl.sleep(RETRY_SLEEP * retryCount.toLong())
             }
         }
 
         log.warn("Insufficient spendable states identified for $amount")
-        return emptyList()
+        return stateAndRefs
     }
 
     override fun <T : ContractState> softLockedStates(lockId: UUID?): List<StateAndRef<T>> {
